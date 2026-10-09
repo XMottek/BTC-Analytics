@@ -2,6 +2,8 @@ import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
   signInWithPopup, 
+  signInWithRedirect,
+  getRedirectResult,
   GoogleAuthProvider, 
   signOut as firebaseSignOut, 
   onAuthStateChanged,
@@ -19,7 +21,13 @@ const app = initializeApp(firebaseConfig);
 // CRITICAL: Must pass databaseId
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({
+  prompt: 'select_account',
+});
+
+export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
 
 export enum OperationType {
   CREATE = 'create',
@@ -83,8 +91,27 @@ export const loginWithGoogle = async () => {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
-  } catch (error) {
-    console.error('Google login error:', error);
+  } catch (error: any) {
+    console.error('Google login error (Popup):', error);
+    throw error;
+  }
+};
+
+export const loginWithGoogleRedirect = async () => {
+  try {
+    await signInWithRedirect(auth, googleProvider);
+  } catch (error: any) {
+    console.error('Google login error (Redirect):', error);
+    throw error;
+  }
+};
+
+export const checkRedirectResult = async () => {
+  try {
+    const result = await getRedirectResult(auth);
+    return result?.user || null;
+  } catch (error: any) {
+    console.error('Redirect result error:', error);
     throw error;
   }
 };
