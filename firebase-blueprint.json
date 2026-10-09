@@ -1,0 +1,87 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Benutzerprofil",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 256 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "photoURL": { "type": "string", "maxLength": 1024 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "PortfolioTransaction": {
+      "title": "PortfolioTransaction",
+      "description": "Bitcoin Transaktion des Benutzers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["BUY", "SELL"] },
+        "amountBtc": { "type": "number" },
+        "pricePerBtcUsd": { "type": "number" },
+        "feeUsd": { "type": "number" },
+        "date": { "type": "string", "maxLength": 32 },
+        "note": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "type", "amountBtc", "pricePerBtcUsd", "date"]
+    },
+    "UserAnalysis": {
+      "title": "UserAnalysis",
+      "description": "KI-Analyse des Portfolios des Benutzers",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "totalBtc": { "type": "number" },
+        "avgBuyPrice": { "type": "number" },
+        "analysisText": { "type": "string", "maxLength": 10000 },
+        "riskLevel": { "type": "string", "maxLength": 64 },
+        "portfolioScore": { "type": "number" },
+        "recommendation": { "type": "string", "maxLength": 2048 },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "totalBtc", "analysisText", "updatedAt"]
+    },
+    "UserAlertRule": {
+      "title": "UserAlertRule",
+      "description": "Benutzerdefinierte Markt-Alarmregel",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 128 },
+        "condition": { "type": "string", "maxLength": 32 },
+        "targetValue": { "type": "number" },
+        "active": { "type": "boolean" },
+        "triggered": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "title", "condition", "targetValue", "active"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Benutzerprofil und Einstellungen"
+    },
+    "/users/{userId}/transactions/{transactionId}": {
+      "schema": "PortfolioTransaction",
+      "description": "Bitcoin-Transaktionsbuch des Benutzers"
+    },
+    "/users/{userId}/analyses/{analysisId}": {
+      "schema": "UserAnalysis",
+      "description": "Personalisierte Portfolioanalysen und KI-Bewertungen"
+    },
+    "/users/{userId}/alerts/{alertId}": {
+      "schema": "UserAlertRule",
+      "description": "Persönliche Markt-Alarmregeln des Benutzers"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "SatoshiPulse - Bitcoin Macro Prognose & Portfolio Terminal",
+  "description": "KI-gestützte Bitcoin-Marktanalyse, makroökonomische & geopolitische Zukunftsprognosen, Kauf-/Verkaufsempfehlungen, Portfolioanalyse und automatisierte Marktalarme.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
