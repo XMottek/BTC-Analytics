@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { MarketData, PortfolioTransaction } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { db, handleFirestoreError, OperationType } from '../firebase';
+import { CsvImportModal } from './CsvImportModal';
 import { 
   collection, 
   doc, 
@@ -35,7 +36,8 @@ import {
   BrainCircuit,
   Award,
   RefreshCw,
-  Clock
+  Clock,
+  Upload
 } from 'lucide-react';
 
 interface PortfolioViewProps {
@@ -96,6 +98,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({ marketData }) => {
 
   // Transaction form modal
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [newTx, setNewTx] = useState({
     type: 'BUY' as 'BUY' | 'SELL',
     amountBtc: '',
@@ -224,7 +227,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({ marketData }) => {
         handleFirestoreError(error, OperationType.CREATE, `users/${currentUser.uid}/transactions/${txId}`);
       }
     } else {
-      setTransactions([txData, ...transactions]);
+      const updated = [txData, ...transactions];
+      updated.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      setTransactions(updated);
     }
 
     setShowAddModal(false);
@@ -274,6 +279,37 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({ marketData }) => {
       }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `users/${currentUser.uid}/transactions`);
+    }
+  };
+
+  // Confirm and persist CSV-imported transactions (e.g. from Bitvavo)
+  const handleConfirmImport = async (newTxs: PortfolioTransaction[]) => {
+    if (currentUser) {
+      for (const tx of newTxs) {
+        try {
+          const docRef = doc(db, 'users', currentUser.uid, 'transactions', tx.id);
+          await setDoc(docRef, {
+            id: tx.id,
+            userId: currentUser.uid,
+            type: tx.type,
+            amountBtc: tx.amountBtc,
+            pricePerBtcUsd: tx.pricePerBtcUsd,
+            feeUsd: tx.feeUsd || 0,
+            date: tx.date,
+            note: tx.note || 'Bitvavo / CSV Import',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+        } catch (error) {
+          handleFirestoreError(error, OperationType.CREATE, `users/${currentUser.uid}/transactions/${tx.id}`);
+        }
+      }
+    } else {
+      // Local mode: merge and sort strictly chronologically by date
+      const merged = [...newTxs, ...transactions];
+      merged.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      setTransactions(merged);
+      localStorage.setItem('sat_portfolio_txs', JSON.stringify(merged));
     }
   };
 
@@ -601,7 +637,16 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({ marketData }) => {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:border-amber-500/40 text-xs font-semibold transition cursor-pointer"
+              title="Transaktionen aus CSV importieren"
+            >
+              <Upload className="w-3.5 h-3.5 text-amber-400" />
+              <span>CSV-Import</span>
+            </button>
+
             {currentUser && transactions.length === 0 && (
               <button
                 onClick={handleImportDemo}
@@ -938,6 +983,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({ marketData }) => {
           </div>
         </div>
       )}
+
+      {/* CSV Import Modal (Bitvavo & Exchanges) */}
+      <CsvImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        existingTransactions={transactions}
+        onImportConfirmed={handleConfirmImport}
+        eurToUsdRate={1 / eurRate}
+      />
     </div>
   );
 };
