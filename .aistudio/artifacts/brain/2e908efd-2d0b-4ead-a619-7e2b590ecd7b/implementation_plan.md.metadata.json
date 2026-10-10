@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementierungsplan zur Korrektur der Datumserkennung beim Bitvavo-CSV-Import, Ermöglichung des automatischen Überschreibens bestehender Transaktionen mit dem echten Kaufdatum sowie Darstellung im deutschen Datumsformat (TT.MM.JJJJ).",
-  "updatedAt":  "2026-10-10T09:34:37.980828916Z",
+  "summary":  "Detaillierter Implementierungsplan zur Behebung der falschen Mengenberechnung (24.3136 BTC statt 0.3136 BTC) beim CSV-Import durch eine interaktive Spaltenzuordnung (Spalten-Vorschau und manuelle Auswahl von Menge, Datum, Kurs) sowie Bereinigung der Bestandsdaten.",
+  "updatedAt":  "2026-10-10T10:40:57.658652929Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

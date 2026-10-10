@@ -38,7 +38,9 @@ import {
   Zap,
   Check,
   Calendar,
-  Pencil
+  Pencil,
+  AlertTriangle,
+  SlidersHorizontal
 } from 'lucide-react';
 
 interface PortfolioViewProps {
@@ -97,6 +99,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   // Modals state
   const [showAddModal, setShowAddModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showClearConfirmModal, setShowClearConfirmModal] = useState(false);
   const [editingTx, setEditingTx] = useState<{ id: string; date: string; time: string } | null>(null);
   const [newTx, setNewTx] = useState({
     type: 'BUY' as 'BUY' | 'SELL',
@@ -282,6 +285,24 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     }
   };
 
+  // Completely wipe all transactions (e.g. to reset mistaken 24 BTC before re-importing)
+  const handleClearAllTransactions = async () => {
+    localStorage.setItem('sat_demo_cleared', 'true');
+    setTransactions([]);
+    localStorage.setItem('sat_portfolio_txs', JSON.stringify([]));
+
+    if (currentUser) {
+      for (const t of transactions) {
+        try {
+          await deleteDoc(doc(db, 'users', currentUser.uid, 'transactions', t.id));
+        } catch (e) {
+          console.warn('Could not delete tx from Firestore:', e);
+        }
+      }
+    }
+    setShowClearConfirmModal(false);
+  };
+
   // Add Transaction
   const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -405,6 +426,12 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         } catch (error) {
           handleFirestoreError(error, OperationType.CREATE, `users/${currentUser.uid}/transactions/${tx.id}`);
         }
+      }
+
+      if (mode === 'replace_all') {
+        const sorted = [...submittedTxs].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        setTransactions(sorted);
+        localStorage.setItem('sat_portfolio_txs', JSON.stringify(sorted));
       }
     } else {
       // Local mode
@@ -951,6 +978,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
       {/* Transactions History & Manager */}
       <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 backdrop-blur-md">
+        {/* Transactions Header Bar */}
         <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
           <div>
             <h4 className="text-base font-bold text-slate-100 flex items-center gap-2">
@@ -982,10 +1010,21 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               </button>
             )}
 
+            {transactions.length > 0 && !hasDemoData && (
+              <button
+                onClick={() => setShowClearConfirmModal(true)}
+                className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-slate-700 hover:border-rose-500/30 text-xs font-semibold transition cursor-pointer flex items-center gap-1.5"
+                title="Alle Transaktionen löschen"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Leeren</span>
+              </button>
+            )}
+
             <button
               onClick={() => setShowImportModal(true)}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:border-amber-500/40 text-xs font-semibold transition cursor-pointer"
-              title="Transaktionen aus CSV importieren"
+              title="Transaktionen aus CSV importieren mit Spaltenprüfung"
             >
               <Upload className="w-3.5 h-3.5 text-amber-400" />
               <span>CSV-Import</span>
@@ -1000,6 +1039,29 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Warning & Guidance Banner if BTC holding is unexpectedly high (e.g. 24 BTC instead of 0.3136 BTC) */}
+        {portfolioMetrics.totalBtc > 5 && (
+          <div className="mb-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-200">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <strong className="text-amber-300 font-semibold block text-sm">
+                  Aktueller Bestand: {portfolioMetrics.totalBtc.toFixed(4)} BTC (zu hoch berechnet?)
+                </strong>
+                <p className="text-slate-300 mt-0.5 text-[11px] leading-relaxed">
+                  Falls dein tatsächlicher Gesamtbestand bei <strong>0.3136 BTC</strong> liegt (und nicht bei ~24 BTC), wurde beim früheren Import eine Spalte wie „Anzahl“ mit Wert 1 als BTC-Menge gewertet. Öffne den CSV-Import, um über die neue <strong>manuelle Spaltenprüfung</strong> deine Mengenspalte zu prüfen und den Bestand mit <strong>„Komplett ersetzen“</strong> auf deine echten 0.3136 BTC zu korrigieren.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shrink-0 transition cursor-pointer shadow-lg shadow-amber-500/20"
+            >
+              Spalten prüfen & korrigieren
+            </button>
+          </div>
+        )}
 
         {/* Transactions Table */}
         <div className="overflow-x-auto">
@@ -1252,6 +1314,40 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Clear All Confirmation Modal */}
+      {showClearConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-400 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/20 flex items-center justify-center">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <h4 className="text-base font-bold text-slate-100">Transaktionen leeren?</h4>
+            </div>
+            <p className="text-xs text-slate-300 mb-4 leading-relaxed">
+              Möchtest du wirklich alle <strong>{transactions.length} Transaktionen</strong> aus deinem Portfolio entfernen? 
+              Dies setzt den Bestand auf 0 zurück, damit du anschließend deine CSV-Datei mit der richtigen Mengenspalte sauber neu importieren kannst.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowClearConfirmModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs cursor-pointer"
+              >
+                Abbrechen
+              </button>
+              <button
+                type="button"
+                onClick={handleClearAllTransactions}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition cursor-pointer shadow-lg shadow-rose-600/20"
+              >
+                Ja, alle löschen
+              </button>
+            </div>
           </div>
         </div>
       )}

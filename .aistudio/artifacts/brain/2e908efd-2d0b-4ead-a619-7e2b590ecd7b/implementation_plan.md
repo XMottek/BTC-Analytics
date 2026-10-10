@@ -1,58 +1,56 @@
-# SatoshiPulse: Korrektur der Kaufdatumserkennung & automatisches Datums-Update
+# SatoshiPulse: Interaktive Spaltenzuordnung & Korrektur des BTC-Bestands
 
-Der Nutzer hat festgestellt, dass importierte Transaktionen in der App das Datum des Imports anstelle des tatsächlichen Kaufdatums aus der Bitvavo-CSV anzeigen. Ziel dieses Plans ist es, den Datums-Parser plattform- und browserunabhängig abzusichern, bestehende Transaktionen beim Re-Import automatisch mit dem echten Kaufdatum zu aktualisieren und die Datumsanzeige in der Transaktionstabelle auf das deutsche Format (`TT.MM.JJJJ [HH:mm]`) umzustellen.
+## Problemursache
+Der Nutzer hat eine eigene Excel-Tabelle als CSV mit 24 Käufen importiert. Die tatsächliche Gesamtsumme beträgt **0.3136 BTC**, in der App wurde jedoch ein Gesamtbestand von **24.3136 BTC** berechnet – exakt 24 BTC (also 1.0 BTC pro Zeile) zu viel.
+Dies tritt auf, wenn in einer Excel-Tabelle eine Zähl- oder Mengenspalte wie `Anzahl` (Wert `1`) oder eine Stückzahlspalte fälschlicherweise als BTC-Menge erkannt wurde, während der eigentliche BTC-Teilbetrag in einer anderen Spalte (z. B. `BTC`, `Betrag`, `Menge (BTC)`) lag.
 
----
-
-## 1. Ursachenanalyse der falschen Datumsangabe
-
-1. **Browser-Inkompatibilität bei `new Date("YYYY-MM-DD HH:mm:ss")`**:
-   - In Safari (macOS / iOS / WebKit) und bestimmten Browser-Engines liefert `new Date("2024-03-05 09:12:00")` ein ungültiges Datum (`Invalid Date` / `NaN`).
-   - Der bisherige Parser fiel bei `isNaN(ts)` stillschweigend auf `new Date().toISOString().split('T')[0]` zurück – das exakte Datum des heutigen Imports.
-2. **Europäische & getrennte Datumsspalten**:
-   - Bitvavo und deutsche Excel-Exporte nutzen teils `DD-MM-YYYY`, `DD.MM.YYYY`, `DD/MM/YYYY` oder getrennte Spalten `Date` und `Time`.
-   - UTF-8 BOM-Zeichen (`\uFEFF`) am Dateianfang können zudem Spaltennamen wie `\uFEFFDate` verfälschen.
-3. **Duplikat-Sperre beim Re-Import**:
-   - Bisher verhinderte die Duplikatprüfung das Aktualisieren vorhandener Einträge, sodass fälschlicherweise datierte Einträge nicht überschrieben werden konnten.
+Der Nutzer möchte vor dem Import die Spalten einsehen und manuell prüfen bzw. zuweisen können, um sicherzustellen, dass exakt die richtige Mengenspalte ausgewählt wird.
 
 ---
 
-## 2. Geplante Änderungen & Architektur
+## Vorgeschlagene Änderungen
 
-### A. Robuster, browserunabhängiger Datums-Parser (`src/utils/csvParser.ts`)
-- **BOM-Entfernung**: Bereinigung von Byte Order Marks (`\uFEFF`) am Header und in Token.
-- **Mehrstufiger Datums- & Zeit-Parser**:
-  - Zerlegung von Datums- und Uhrzeitkomponenten mittels dedizierter Regex statt nativer Browser-`Date`-Konstruktor-Raten:
-    - ISO: `YYYY-MM-DD` mit optionaler Uhrzeit `HH:mm[:ss]`
-    - Deutsches Format: `DD.MM.YYYY` mit optionaler Uhrzeit `HH:mm[:ss]`
-    - Europäischer Schrägstrich: `DD/MM/YYYY` mit optionaler Uhrzeit
-    - Bindestrich-Format: `DD-MM-YYYY` mit optionaler Uhrzeit
-    - Timestamp (Sekunden oder Millisekunden)
-  - Zusammensetzen eines validen ISO-Zeitstempels (`YYYY-MM-DDTHH:mm:ssZ`) und exaktem Unix-Millisekunden-Zeitstempel.
-  - Wenn eine Zeitspalte vorliegt, wird diese exakt mit Stunde, Minute und Sekunde eingepflegt.
+### 1. Interaktive Spalten-Zuordnung & Live-Vorschau im CSV-Import (`CsvImportModal.tsx`)
+- **Schrittweise oder aufklappbare Spaltenprüfung vor dem Import:**
+  - Automatische Vorbelegung der Spalten anhand intelligenter Heuristiken (bevorzugt Spalten mit Dezimalwerten / `btc` im Header gegenüber reinen Zählspalten wie `Anzahl = 1`).
+  - **Manuelle Dropdown-Auswahl** für alle relevanten Felder:
+    - **BTC-Menge / Betrag** *(Pflichtfeld)*
+    - **Kaufdatum** *(Pflichtfeld)*
+    - **Uhrzeit** *(optional)*
+    - **Typ (Kauf / Verkauf)** *(optional oder manuell auf "Kauf" fixierbar)*
+    - **Kurs / Preis pro BTC** *(optional, falls Gesamtbetrag vorhanden)*
+    - **Gesamtbetrag (EUR/USD)** *(optional, falls Kurs vorhanden)*
+    - **Gebühr** *(optional)*
+  - **Werte-Vorschau pro Spalte:** Direkt unter jedem Dropdown werden die ersten 3 Werte aus der CSV angezeigt (z. B. `0.01306 BTC`, `0.01050 BTC` statt `1`, `1`), sodass auf einen Blick ersichtlich ist, welche Spalte die echten BTC-Mengen enthält.
+  - **Live-Berechnung der Gesamtsumme:** Ein prominenter Infokasten zeigt noch vor dem Import die berechnete Summe:
+    `Berechneter Gesamtbestand: X.XXXX BTC aus Y Transaktionen`. Bei richtiger Spaltenwahl sieht der Nutzer sofort die korrekten **0.3136 BTC**!
 
-### B. Automatisches Datums-Update beim Re-Import (`src/components/CsvImportModal.tsx`)
-- Erkennung bereits importierter Transaktionen anhand von Order-ID oder exakter Übereinstimmung von Betrag, Kaufpreis und Typ.
-- Bereitstellung einer klaren Option im Import-Dialog:
-  - **Option 1**: *"Bestehende Transaktionen mit echtem Kaufdatum aktualisieren"* (nutzt die Antworten des Nutzers).
-  - **Option 2**: *"Nur neue Transaktionen hinzufügen"*.
-  - **Option 3**: *"Bisherige Transaktionen komplett durch diese CSV ersetzen"*.
-- Anzeige einer Vorher-Nachher-Vorschau mit dem erkannten Kaufdatum (z. B. `12.11.2023, 10:14 Uhr`).
+### 2. Verbesserter Parser & Spalten-Erkennung (`src/utils/csvParser.ts`)
+- Erweiterung der Parser-Logik um eine Trennung zwischen Rohzeilen-Extraktion (`extractCsvHeadersAndPreview`) und konfigurierbarem Zeilen-Mapping (`parseBitcoinCsvWithMapping`).
+- Schutz vor falschen Ganzzahl-Matches: Spalten wie `Anzahl`, `Stück`, `Pos`, `Nr.` werden bei Vorhandensein von Dezimal-BTC-Spalten nicht als primäre Mengenspalte priorisiert.
+- Unterstützung flexibler Kommaschreibweisen für deutsche Excel-Exporte (`0,01306` oder `0.01306`).
 
-### C. Persistenz in Firebase & LocalStorage (`src/components/PortfolioView.tsx`)
-- Aktualisierung der Datums- und Zeitstempelfelder in Firestore (`users/{uid}/transactions/{id}`) und im LocalStorage.
-- Chronologische Neusortierung aller Bestände nach dem echten Kaufdatum für eine lückenlose steuerliche und zeitliche Bilanzierung.
-- Bereitstellung eines manuellen Bearbeitungs-Modus (Datum per Date-Picker anpassen), falls einzelne Einträge korrigiert werden sollen.
-
-### D. Darstellung im deutschen Datumsformat (`src/components/PortfolioView.tsx`)
-- Formatierungsfunktion `formatGermanDate(dateStr, timeStr?)`:
-  - Ausgabe: `TT.MM.JJJJ` (z. B. `12.11.2023`) oder `TT.MM.JJJJ, HH:mm Uhr` (z. B. `12.11.2023, 10:14 Uhr`).
-  - Ersetzung der bisherigen rohen ISO-Ausgabe (`YYYY-MM-DD`) in der Tabelle und im Portfolio-Audit.
+### 3. Bereinigung & Ersetzen des fehlerhaften Bestands (`PortfolioView.tsx`)
+- **Option zum vollständigen Überschreiben / Bereinigen:**
+  - Im Import-Modal wird explizit die Option angeboten:
+    *„Bestehende Transaktionen vollständig durch die korrigierten Daten ersetzen (Empfohlen: setzt den Bestand von 24.31 auf 0.31 BTC zurück)“*.
+  - Schnelle Ein-Klick-Möglichkeit in der Transaktionsliste, um den aktuellen fehlerhaften Datensatz zurückzusetzen oder direkt neu zu importieren.
+- **Automatische Neuberechnung der Kennzahlen:**
+  - Sofortige Aktualisierung des Portfoliowerts (bei ~90.000 $/BTC ca. 28.000 $ statt >2.000.000 $).
+  - Aktualisierung der KI-Bestandsanalyse auf Basis des tatsächlichen Bestands von 0.3136 BTC.
 
 ---
 
-## 3. Test- & Validierungsplan
-1. Import der Bitvavo-Sample-Daten und Überprüfung, dass das historische Kaufdatum (z. B. `12.11.2023`) statt des heutigen Tages angezeigt wird.
-2. Re-Import-Test: Aktualisierung bestehender Transaktionen ohne Duplikat-Fehler.
-3. Plattform-Check: Sicherstellen, dass Safari, Chrome und Firefox identische Zeitstempel parsen.
-4. Überprüfung der Firestore-Synchronisierung und fehlerfreie Kompilierung (`compile_applet`).
+## Verifizierungsplan
+
+### Manuelle & UI-Tests
+1. **CSV-Upload mit Spaltenauswahl:**
+   - Test-CSV mit Spalten `Nr;Datum;Anzahl;Menge_BTC;Kurs;Gesamt` hochladen.
+   - Prüfen, dass die Spaltenauswahl erscheint und die Vorschau für `Anzahl` (1) vs. `Menge_BTC` (0.01306...) anzeigt.
+   - Verifizieren, dass die Live-Gesamtsumme oben exakt 0.3136 BTC anzeigt, sobald `Menge_BTC` gewählt ist.
+2. **Import-Bestätigung & Überschreiben:**
+   - Mit dem Modus „Transaktionen ersetzen“ bestätigen.
+   - Verifizieren, dass in der Transaktionstabelle und im Dashboard exakt 0.3136 BTC und der reale Portfoliowert angezeigt werden.
+   - Verifizieren, dass das deutsche Kaufdatum (TT.MM.JJJJ) erhalten bleibt.
+3. **Build & Lint:**
+   - Ausführen von `compile_applet` und `lint_applet` zur Fehlerfreiheit.

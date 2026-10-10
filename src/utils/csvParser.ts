@@ -23,6 +23,8 @@ export interface ParsedCsvRow {
 export interface CsvParseResult {
   rows: ParsedCsvRow[];
   totalRows: number;
+  totalBtcSum: number; // Sum of all BTC amounts parsed
+  totalCostOriginalSum: number;
   duplicateCount: number;
   newCount: number;
   matchedCount: number;
@@ -38,12 +40,47 @@ export interface FlexibleDateResult {
   timestamp: number; // Unix ms
 }
 
+export interface ColumnPreview {
+  header: string;
+  index: number;
+  sampleValues: string[];
+  isLikelyBtcAmount: boolean;
+  isLikelyCounter: boolean; // e.g. "Anzahl = 1" or "Nr"
+  isLikelyDate: boolean;
+  isLikelyPrice: boolean;
+}
+
+export interface ColumnMapping {
+  colAmount: string; // Header name or '__calc__'
+  colDate: string; // Header name
+  colTime: string; // Header name or '__none__'
+  colType: string; // Header name or '__fixed_buy__' | '__fixed_sell__'
+  colPrice: string; // Header name or '__none__'
+  colTotal: string; // Header name or '__none__'
+  colFee: string; // Header name or '__none__'
+  colCurrency: string; // Header name or '__eur__' | '__usd__'
+  colMarket: string; // Header name or '__none__'
+  colId: string; // Header name or '__none__'
+  fallbackType: 'BUY' | 'SELL';
+  currencyMode: 'AUTO' | 'EUR' | 'USD';
+}
+
+export interface RawCsvInfo {
+  headers: string[];
+  columnPreviews: ColumnPreview[];
+  sampleRows: string[][];
+  totalRowsCount: number;
+  delimiter: string;
+  suggestedMapping: ColumnMapping;
+}
+
 /**
- * Normalizes numbers from either German (1.234,56) or English (1,234.56) formatting.
+ * Normalizes numbers from either German (1.234,56 / 0,01306) or English (1,234.56 / 0.01306) formatting.
+ * Never treats values starting with "0," or small decimals as thousands separators.
  */
 export function parseFlexibleNumber(raw: string | undefined): number {
   if (!raw) return 0;
-  let str = raw.trim().replace(/[$€£\s]/g, '');
+  let str = raw.trim().replace(/[$€£\s]/g, '').replace(/(?:btc|xbt|eur|usd)/gi, '').trim();
 
   if (!str) return 0;
 
@@ -57,11 +94,14 @@ export function parseFlexibleNumber(raw: string | undefined): number {
       str = str.replace(/,/g, '');
     }
   } else if (str.includes(',')) {
-    // Only comma: could be decimal (0,05) or thousands (1,000)
+    // Only comma:
+    // In German crypto CSVs/Excel, commas are decimal separators (e.g. 0,01306 or 0,3136 or 64500,50)
+    // A thousands separator NEVER has a leading 0 (like 0,123)
     const parts = str.split(',');
-    if (parts.length === 2 && parts[1].length !== 3) {
+    if (parts[0] === '0' || parts[0] === '-0' || parts[0] === '+0') {
       str = str.replace(',', '.');
-    } else if (parts.length === 2 && parts[1].length === 3 && parseFloat(parts[0]) > 0) {
+    } else if (parts.length === 2) {
+      // If 2 parts and second part is not 3 digits, or if value is a typical crypto decimal
       str = str.replace(',', '.');
     } else {
       str = str.replace(/,/g, '');
@@ -219,14 +259,189 @@ export function generateFingerprint(dateStr: string, type: string, amountBtc: nu
 }
 
 /**
- * Parses Bitvavo and generic Crypto CSV data with smart duplicate and date mismatch detection.
+ * Splits a single CSV row safely respecting quotation marks.
  */
-export function parseBitcoinCsv(
+function splitCsvRow(line: string, delimiter: string): string[] {
+  const tokens: string[] = [];
+  let insideQuote = false;
+  let currentToken = '';
+
+  for (let c = 0; c < line.length; c++) {
+    const char = line[c];
+    if (char === '"' || char === "'") {
+      insideQuote = !insideQuote;
+    } else if (char === delimiter && !insideQuote) {
+      tokens.push(currentToken.trim());
+      currentToken = '';
+    } else {
+      currentToken += char;
+    }
+  }
+  tokens.push(currentToken.trim());
+  return tokens;
+}
+
+/**
+ * Analyzes raw CSV text and extracts headers, sample rows, and intelligent initial column mapping.
+ * Protects against selecting integer counter columns (e.g. "Anzahl = 1") over actual BTC amounts.
+ */
+export function analyzeCsvRaw(csvContent: string): RawCsvInfo {
+  const cleanContent = csvContent.replace(/^\uFEFF/, '');
+  const lines = cleanContent
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\uFEFF/, '').trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length === 0) {
+    return {
+      headers: [],
+      columnPreviews: [],
+      sampleRows: [],
+      totalRowsCount: 0,
+      delimiter: ',',
+      suggestedMapping: {
+        colAmount: '',
+        colDate: '',
+        colTime: '__none__',
+        colType: '__fixed_buy__',
+        colPrice: '',
+        colTotal: '',
+        colFee: '__none__',
+        colCurrency: '__eur__',
+        colMarket: '__none__',
+        colId: '__none__',
+        fallbackType: 'BUY',
+        currencyMode: 'AUTO',
+      },
+    };
+  }
+
+  // Detect delimiter
+  const headerLine = lines[0];
+  const commaCount = (headerLine.match(/,/g) || []).length;
+  const semiCount = (headerLine.match(/;/g) || []).length;
+  const tabCount = (headerLine.match(/\t/g) || []).length;
+  const delimiter = semiCount > commaCount ? ';' : tabCount > commaCount ? '\t' : ',';
+
+  const rawHeaders = splitCsvRow(headerLine, delimiter).map((h) => h.replace(/['"\uFEFF]/g, '').trim());
+
+  // Collect sample rows (up to 5 data rows)
+  const sampleRows: string[][] = [];
+  for (let i = 1; i < Math.min(lines.length, 6); i++) {
+    sampleRows.push(splitCsvRow(lines[i], delimiter));
+  }
+
+  // Analyze each column
+  const columnPreviews: ColumnPreview[] = rawHeaders.map((header, idx) => {
+    const sampleValues = sampleRows.map((row) => (row[idx] !== undefined ? row[idx] : '')).filter((v) => v !== '');
+    const lowerHeader = header.toLowerCase();
+
+    // Check if values in this column look like integers only (e.g. 1, 1, 1 or 1, 2, 3)
+    const isAllInts = sampleValues.length > 0 && sampleValues.every((v) => /^-?\d+$/.test(v.trim()));
+    const isAllOnes = sampleValues.length > 0 && sampleValues.every((v) => v.trim() === '1');
+    const hasDecimalPointOrComma = sampleValues.some((v) => v.includes('.') || v.includes(','));
+    const isLikelyCounter = (lowerHeader.includes('anzahl') || lowerHeader.includes('stk') || lowerHeader === 'nr' || lowerHeader.includes('pos')) && (isAllInts || isAllOnes);
+
+    // Check if values look like small decimals (< 10) typical for BTC purchases
+    const hasSmallDecimals = sampleValues.some((v) => {
+      const num = parseFlexibleNumber(v);
+      return num > 0 && num < 10;
+    });
+
+    const isLikelyBtcAmount = 
+      (lowerHeader.includes('btc') || lowerHeader.includes('menge') || lowerHeader.includes('amount') || lowerHeader.includes('aantal') || lowerHeader.includes('filled')) &&
+      !isLikelyCounter;
+
+    const isLikelyDate = lowerHeader.includes('datum') || lowerHeader.includes('date') || lowerHeader.includes('zeit') || lowerHeader.includes('time') || lowerHeader.includes('created');
+    const isLikelyPrice = lowerHeader.includes('kurs') || lowerHeader.includes('preis') || lowerHeader.includes('price') || lowerHeader.includes('prijs') || lowerHeader.includes('rate');
+
+    return {
+      header,
+      index: idx,
+      sampleValues,
+      isLikelyBtcAmount: isLikelyBtcAmount || (hasDecimalPointOrComma && hasSmallDecimals && !isLikelyPrice && !isLikelyDate),
+      isLikelyCounter,
+      isLikelyDate,
+      isLikelyPrice,
+    };
+  });
+
+  // Helper to find best matching header
+  const findBestHeader = (...keywords: string[]): string => {
+    const match = rawHeaders.find((h) => {
+      const lh = h.toLowerCase();
+      return keywords.some((k) => lh === k || lh.includes(k));
+    });
+    return match || '';
+  };
+
+  // Special amount picker: prioritize columns with 'btc' or decimal values over counters like 'anzahl'
+  let bestAmountHeader = '';
+  // 1. Column with both 'btc' in name and not counter
+  const btcHeader = rawHeaders.find((h) => {
+    const lh = h.toLowerCase();
+    return (lh.includes('btc') || lh.includes('xbt')) && !lh.includes('kurs') && !lh.includes('preis') && !lh.includes('fee');
+  });
+  if (btcHeader) {
+    bestAmountHeader = btcHeader;
+  } else {
+    // 2. Column identified as isLikelyBtcAmount
+    const likelyCol = columnPreviews.find((p) => p.isLikelyBtcAmount && !p.isLikelyCounter);
+    if (likelyCol) {
+      bestAmountHeader = likelyCol.header;
+    } else {
+      // 3. Fallback to keyword matching, excluding 'anzahl'
+      bestAmountHeader = findBestHeader('amount', 'menge', 'aantal', 'filled', 'quantity', 'volume', 'size');
+      if (!bestAmountHeader) {
+        bestAmountHeader = findBestHeader('anzahl');
+      }
+    }
+  }
+
+  // Date column
+  const bestDateHeader = findBestHeader('datum', 'date', 'transactiedatum', 'trade date', 'order date', 'kaufdatum', 'ausführung', 'zeitstempel', 'timestamp', 'datetime', 'created');
+  const bestTimeHeader = findBestHeader('time', 'tijd', 'uhrzeit', 'time_utc', 'zeit');
+  const bestTypeHeader = findBestHeader('type', 'typ', 'side', 'zijde', 'action', 'art', 'transaktion');
+  const bestPriceHeader = findBestHeader('kurs', 'preis', 'price', 'prijs', 'rate', 'unit price', 'kaufkurs');
+  const bestTotalHeader = findBestHeader('gesamt', 'total', 'totaal', 'wert', 'cost', 'kosten', 'subtotal', 'betrag');
+  const bestFeeHeader = findBestHeader('fee', 'gebühr', 'gebuehr', 'kosten', 'commission');
+  const bestMarketHeader = findBestHeader('market', 'markt', 'pair', 'handelspaar', 'symbol');
+  const bestIdHeader = findBestHeader('id', 'order id', 'order_id', 'tx id', 'transaction id', 'transaktions-id', 'external id');
+  const bestCurrencyHeader = findBestHeader('currency', 'valuta', 'währung', 'fiat');
+
+  return {
+    headers: rawHeaders,
+    columnPreviews,
+    sampleRows,
+    totalRowsCount: lines.length - 1,
+    delimiter,
+    suggestedMapping: {
+      colAmount: bestAmountHeader,
+      colDate: bestDateHeader,
+      colTime: bestTimeHeader && bestTimeHeader !== bestDateHeader ? bestTimeHeader : '__none__',
+      colType: bestTypeHeader ? bestTypeHeader : '__fixed_buy__',
+      colPrice: bestPriceHeader,
+      colTotal: bestTotalHeader,
+      colFee: bestFeeHeader ? bestFeeHeader : '__none__',
+      colCurrency: bestCurrencyHeader ? bestCurrencyHeader : '__eur__',
+      colMarket: bestMarketHeader ? bestMarketHeader : '__none__',
+      colId: bestIdHeader ? bestIdHeader : '__none__',
+      fallbackType: 'BUY',
+      currencyMode: 'AUTO',
+    },
+  };
+}
+
+/**
+ * Parses CSV rows using user-specified column mappings.
+ * Computes exact total BTC sum and provides duplicate and date mismatch detection.
+ */
+export function parseBitcoinCsvWithMapping(
   csvContent: string,
+  mapping: ColumnMapping,
   existingTransactions: PortfolioTransaction[],
   eurToUsdRate: number = 1.08
 ): CsvParseResult {
-  // Strip BOM if present
   const cleanContent = csvContent.replace(/^\uFEFF/, '');
   const lines = cleanContent
     .split(/\r?\n/)
@@ -239,6 +454,8 @@ export function parseBitcoinCsv(
     return {
       rows: [],
       totalRows: 0,
+      totalBtcSum: 0,
+      totalCostOriginalSum: 0,
       duplicateCount: 0,
       newCount: 0,
       matchedCount: 0,
@@ -248,51 +465,38 @@ export function parseBitcoinCsv(
     };
   }
 
-  // Detect delimiter: semicolon, tab or comma
+  // Detect delimiter
   const headerLine = lines[0];
   const commaCount = (headerLine.match(/,/g) || []).length;
   const semiCount = (headerLine.match(/;/g) || []).length;
   const tabCount = (headerLine.match(/\t/g) || []).length;
   const delimiter = semiCount > commaCount ? ';' : tabCount > commaCount ? '\t' : ',';
 
-  // Parse header
-  const headers = headerLine
-    .split(delimiter)
-    .map((h) => h.replace(/['"\uFEFF]/g, '').trim().toLowerCase());
+  const headers = splitCsvRow(headerLine, delimiter).map((h) => h.replace(/['"\uFEFF]/g, '').trim());
 
-  // Helper to find column index with broad keyword support (German, English, Dutch)
-  const findCol = (...keywords: string[]): number => {
-    return headers.findIndex((h) => keywords.some((k) => h === k || h.includes(k)));
+  const getIdx = (headerName: string | undefined): number => {
+    if (!headerName || headerName.startsWith('__')) return -1;
+    return headers.findIndex((h) => h.toLowerCase() === headerName.toLowerCase());
   };
 
-  const colDate = findCol(
-    'date',
-    'datum',
-    'transactiedatum',
-    'trade date',
-    'order date',
-    'kaufdatum',
-    'ausführung',
-    'zeitstempel',
-    'timestamp',
-    'datetime',
-    'created'
-  );
-  const colTime = findCol('time', 'tijd', 'uhrzeit', 'time_utc', 'zeit');
-  const colType = findCol('type', 'typ', 'side', 'zijde', 'action', 'art', 'transaktion');
-  const colMarket = findCol('market', 'markt', 'pair', 'handelspaar', 'symbol');
-  const colAmount = findCol('amount', 'menge', 'aantal', 'filled', 'quantity', 'btc', 'volume', 'size', 'anzahl');
-  const colPrice = findCol('price', 'preis', 'prijs', 'kurs', 'rate', 'unit price');
-  const colTotal = findCol('total', 'totaal', 'gesamt', 'wert', 'cost', 'kosten', 'subtotal');
-  const colFee = findCol('fee', 'gebühr', 'gebuehr', 'kosten', 'commission');
-  const colCurrency = findCol('currency', 'valuta', 'währung', 'fiat');
-  const colId = findCol('id', 'order id', 'order_id', 'tx id', 'transaction id', 'transaktions-id', 'external id');
+  const colDateIdx = getIdx(mapping.colDate);
+  const colTimeIdx = getIdx(mapping.colTime);
+  const colTypeIdx = getIdx(mapping.colType);
+  const colAmountIdx = getIdx(mapping.colAmount);
+  const colPriceIdx = getIdx(mapping.colPrice);
+  const colTotalIdx = getIdx(mapping.colTotal);
+  const colFeeIdx = getIdx(mapping.colFee);
+  const colCurrencyIdx = getIdx(mapping.colCurrency);
+  const colMarketIdx = getIdx(mapping.colMarket);
+  const colIdIdx = getIdx(mapping.colId);
 
-  if (colAmount === -1 && colTotal === -1) {
-    errors.push('Keine Spalte für Betrag/Menge gefunden (z.B. Amount, Menge).');
+  if (colAmountIdx === -1 && colTotalIdx === -1) {
+    errors.push('Bitte wähle eine Spalte für die BTC-Menge oder den Gesamtbetrag aus.');
     return {
       rows: [],
       totalRows: 0,
+      totalBtcSum: 0,
+      totalCostOriginalSum: 0,
       duplicateCount: 0,
       newCount: 0,
       matchedCount: 0,
@@ -302,14 +506,13 @@ export function parseBitcoinCsv(
     };
   }
 
-  // Detect format name
-  let detectedFormat = 'Generisches Krypto-CSV';
-  if ((headers.includes('market') || headers.includes('markt')) && (headers.includes('side') || headers.includes('zijde'))) {
-    detectedFormat = 'Bitvavo Trade-Export (CSV)';
-  } else if (headers.includes('datum') && headers.includes('menge')) {
-    detectedFormat = 'Deutscher Börsen-Export';
-  } else if (headers.includes('order id') || headers.includes('txid')) {
-    detectedFormat = 'Exchange Transaktions-Export';
+  // Format label
+  let detectedFormat = 'Benutzerdefinierter CSV-Import';
+  const headersJoined = headers.join(' ').toLowerCase();
+  if (headersJoined.includes('bitvavo') || (headersJoined.includes('market') && headersJoined.includes('side'))) {
+    detectedFormat = 'Bitvavo Trade-Export';
+  } else if (headersJoined.includes('datum') && headersJoined.includes('kurs')) {
+    detectedFormat = 'Excel-Krypto-Portfolio';
   }
 
   // Build index of existing transactions for duplicate and mismatch detection
@@ -325,57 +528,47 @@ export function parseBitcoinCsv(
   let duplicateCount = 0;
   let matchedCount = 0;
   let dateMismatchCount = 0;
+  let totalBtcSum = 0;
+  let totalCostOriginalSum = 0;
 
-  // Parse data rows
   for (let i = 1; i < lines.length; i++) {
-    const rawLine = lines[i];
-    const tokens: string[] = [];
-    let insideQuote = false;
-    let currentToken = '';
-
-    for (let c = 0; c < rawLine.length; c++) {
-      const char = rawLine[c];
-      if (char === '"' || char === "'") {
-        insideQuote = !insideQuote;
-      } else if (char === delimiter && !insideQuote) {
-        tokens.push(currentToken.trim());
-        currentToken = '';
-      } else {
-        currentToken += char;
-      }
-    }
-    tokens.push(currentToken.trim());
-
+    const tokens = splitCsvRow(lines[i], delimiter);
     if (tokens.length < 2) continue;
 
-    // Filter for Bitcoin if Market column specifies asset
-    if (colMarket !== -1) {
-      const marketVal = (tokens[colMarket] || '').toUpperCase();
+    // Filter by Market if present
+    if (colMarketIdx !== -1) {
+      const marketVal = (tokens[colMarketIdx] || '').toUpperCase();
       if (marketVal && !marketVal.includes('BTC') && !marketVal.includes('XBT')) {
         continue;
       }
     }
 
     // Parse date and time
-    const rawDate = colDate !== -1 ? tokens[colDate] : new Date().toISOString().split('T')[0];
-    const rawTime = colTime !== -1 && colTime !== colDate ? tokens[colTime] : undefined;
+    const rawDate = colDateIdx !== -1 ? tokens[colDateIdx] : new Date().toISOString().split('T')[0];
+    const rawTime = colTimeIdx !== -1 && colTimeIdx !== colDateIdx ? tokens[colTimeIdx] : undefined;
     const { dateStr, timeStr, germanFormatted, timestamp } = parseFlexibleDate(rawDate, rawTime);
 
     // Type
-    const typeStr = colType !== -1 ? (tokens[colType] || '').toLowerCase() : 'buy';
-    let type: 'BUY' | 'SELL' = 'BUY';
-    if (typeStr.includes('sell') || typeStr.includes('verkauf') || typeStr.includes('verkauft') || typeStr.includes('sold') || typeStr.includes('verkoop')) {
-      type = 'SELL';
-    } else {
+    let type: 'BUY' | 'SELL' = mapping.fallbackType;
+    if (mapping.colType === '__fixed_buy__') {
       type = 'BUY';
+    } else if (mapping.colType === '__fixed_sell__') {
+      type = 'SELL';
+    } else if (colTypeIdx !== -1) {
+      const typeStr = (tokens[colTypeIdx] || '').toLowerCase();
+      if (typeStr.includes('sell') || typeStr.includes('verkauf') || typeStr.includes('verkauft') || typeStr.includes('sold') || typeStr.includes('verkoop')) {
+        type = 'SELL';
+      } else {
+        type = 'BUY';
+      }
     }
 
     // Amount BTC
-    let amountBtc = colAmount !== -1 ? Math.abs(parseFlexibleNumber(tokens[colAmount])) : 0;
+    let amountBtc = colAmountIdx !== -1 ? Math.abs(parseFlexibleNumber(tokens[colAmountIdx])) : 0;
 
-    // Price
-    let rawPrice = colPrice !== -1 ? parseFlexibleNumber(tokens[colPrice]) : 0;
-    const rawTotal = colTotal !== -1 ? parseFlexibleNumber(tokens[colTotal]) : 0;
+    // Price & Total
+    let rawPrice = colPriceIdx !== -1 ? parseFlexibleNumber(tokens[colPriceIdx]) : 0;
+    const rawTotal = colTotalIdx !== -1 ? parseFlexibleNumber(tokens[colTotalIdx]) : 0;
 
     // Calculate missing price or amount if total exists
     if (rawPrice === 0 && rawTotal > 0 && amountBtc > 0) {
@@ -389,26 +582,33 @@ export function parseBitcoinCsv(
     }
 
     // Currency & USD conversion
-    const currToken = colCurrency !== -1 ? (tokens[colCurrency] || '').toUpperCase() : '';
-    const marketToken = colMarket !== -1 ? (tokens[colMarket] || '').toUpperCase() : '';
-    const isEur = currToken.includes('EUR') || marketToken.includes('EUR') || detectedFormat.includes('Bitvavo') || detectedFormat.includes('Deutsch');
+    let isEur = true;
+    if (mapping.currencyMode === 'EUR') {
+      isEur = true;
+    } else if (mapping.currencyMode === 'USD') {
+      isEur = false;
+    } else {
+      const currToken = colCurrencyIdx !== -1 ? (tokens[colCurrencyIdx] || '').toUpperCase() : '';
+      const marketToken = colMarketIdx !== -1 ? (tokens[colMarketIdx] || '').toUpperCase() : '';
+      isEur = currToken.includes('EUR') || marketToken.includes('EUR') || mapping.colCurrency === '__eur__' || detectedFormat.includes('Excel') || detectedFormat.includes('Bitvavo');
+    }
+
     const currency: 'EUR' | 'USD' = isEur ? 'EUR' : 'USD';
     const pricePerBtcUsd = isEur ? rawPrice * eurToUsdRate : rawPrice;
 
     // Fee
-    let feeUsd = colFee !== -1 ? parseFlexibleNumber(tokens[colFee]) : 0;
+    let feeUsd = colFeeIdx !== -1 ? parseFlexibleNumber(tokens[colFeeIdx]) : 0;
     if (isEur) feeUsd = feeUsd * eurToUsdRate;
 
-    // External ID / ID
-    const extId = colId !== -1 ? tokens[colId]?.replace(/['"]/g, '').trim() : undefined;
+    // External ID
+    const extId = colIdIdx !== -1 ? tokens[colIdIdx]?.replace(/['"]/g, '').trim() : undefined;
 
     // Fingerprint
     const fp = generateFingerprint(dateStr, type, amountBtc, pricePerBtcUsd, extId);
     const fuzzyFp = `fp-${dateStr}_${type}_${amountBtc.toFixed(6)}_${Math.round(pricePerBtcUsd)}`;
-
     const isExactDuplicate = existingFingerprints.has(fp) || existingFingerprints.has(fuzzyFp);
 
-    // Smart matching against existing transactions (to detect transactions needing date updates)
+    // Smart matching against existing transactions
     let matchedExistingTxId: string | undefined;
     let existingDate: string | undefined;
     let hasDateMismatch = false;
@@ -435,6 +635,9 @@ export function parseBitcoinCsv(
     if (isExactDuplicate && !hasDateMismatch) {
       duplicateCount++;
     }
+
+    totalBtcSum += (type === 'BUY' ? amountBtc : -amountBtc);
+    totalCostOriginalSum += amountBtc * rawPrice;
 
     parsedRows.push({
       date: dateStr,
@@ -465,6 +668,8 @@ export function parseBitcoinCsv(
   return {
     rows: parsedRows,
     totalRows: parsedRows.length,
+    totalBtcSum,
+    totalCostOriginalSum,
     duplicateCount,
     newCount,
     matchedCount,
@@ -472,4 +677,16 @@ export function parseBitcoinCsv(
     detectedFormat,
     errors,
   };
+}
+
+/**
+ * Backward-compatible helper that automatically analyzes CSV and parses with suggested mapping.
+ */
+export function parseBitcoinCsv(
+  csvContent: string,
+  existingTransactions: PortfolioTransaction[],
+  eurToUsdRate: number = 1.08
+): CsvParseResult {
+  const analysis = analyzeCsvRaw(csvContent);
+  return parseBitcoinCsvWithMapping(csvContent, analysis.suggestedMapping, existingTransactions, eurToUsdRate);
 }

@@ -1,23 +1,33 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { PortfolioTransaction } from '../types';
-import { parseBitcoinCsv, CsvParseResult, ParsedCsvRow, formatGermanDate } from '../utils/csvParser';
+import { 
+  analyzeCsvRaw,
+  parseBitcoinCsvWithMapping,
+  RawCsvInfo,
+  ColumnMapping,
+  CsvParseResult, 
+  ParsedCsvRow, 
+  formatGermanDate 
+} from '../utils/csvParser';
 import { 
   Upload, 
   FileText, 
   CheckCircle2, 
   AlertCircle, 
-  Copy, 
   ArrowDownLeft, 
   ArrowUpRight, 
-  ShieldCheck, 
   Clock, 
   X,
   FileCheck2,
   Sparkles,
-  HelpCircle,
   Calendar,
   RefreshCw,
-  Layers
+  SlidersHorizontal,
+  Coins,
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Info
 } from 'lucide-react';
 
 interface CsvImportModalProps {
@@ -49,26 +59,52 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
   const [tab, setTab] = useState<'upload' | 'paste'>('upload');
   const [csvText, setCsvText] = useState('');
   const [fileName, setFileName] = useState<string | null>(null);
+  
+  // Column mapping states
+  const [rawInfo, setRawInfo] = useState<RawCsvInfo | null>(null);
+  const [mapping, setMapping] = useState<ColumnMapping | null>(null);
+  const [showMappingDetails, setShowMappingDetails] = useState(true);
+
+  // Parse result & modes
   const [parseResult, setParseResult] = useState<CsvParseResult | null>(null);
-  const [importMode, setImportMode] = useState<'update_dates' | 'add_new' | 'replace_all'>('update_dates');
+  const [importMode, setImportMode] = useState<'update_dates' | 'add_new' | 'replace_all'>('replace_all');
   const [hideDuplicatesInPreview, setHideDuplicatesInPreview] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [importSuccessMessage, setImportSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   if (!isOpen) return null;
 
-  const handleParse = (text: string, sourceName: string) => {
+  const handleProcessCsv = (text: string, sourceName: string) => {
     setFileName(sourceName);
-    const result = parseBitcoinCsv(text, existingTransactions, eurToUsdRate);
+    setCsvText(text);
+
+    const info = analyzeCsvRaw(text);
+    setRawInfo(info);
+    setMapping(info.suggestedMapping);
+
+    const result = parseBitcoinCsvWithMapping(text, info.suggestedMapping, existingTransactions, eurToUsdRate);
     setParseResult(result);
-    // Auto-select update_dates if any date mismatches or matches exist
-    if (result.dateMismatchCount > 0 || result.matchedCount > 0) {
+
+    // If existing transactions look suspicious (> 5 BTC or matches), suggest replace_all to cleanly fix the 24 BTC problem
+    const totalExistingBtc = existingTransactions.reduce((acc, t) => acc + (t.type === 'BUY' ? t.amountBtc : -t.amountBtc), 0);
+    if (totalExistingBtc > 5 || result.dateMismatchCount > 0) {
+      setImportMode('replace_all');
+    } else if (result.matchedCount > 0) {
       setImportMode('update_dates');
     } else {
       setImportMode('add_new');
     }
+  };
+
+  const handleUpdateMapping = (updates: Partial<ColumnMapping>) => {
+    if (!mapping || !rawInfo) return;
+    const newMapping: ColumnMapping = { ...mapping, ...updates };
+    setMapping(newMapping);
+    const result = parseBitcoinCsvWithMapping(csvText, newMapping, existingTransactions, eurToUsdRate);
+    setParseResult(result);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -78,8 +114,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
     const reader = new FileReader();
     reader.onload = (event) => {
       const text = event.target?.result as string;
-      setCsvText(text);
-      handleParse(text, file.name);
+      handleProcessCsv(text, file.name);
     };
     reader.readAsText(file);
   };
@@ -92,15 +127,13 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
     const reader = new FileReader();
     reader.onload = (event) => {
       const text = event.target?.result as string;
-      setCsvText(text);
-      handleParse(text, file.name);
+      handleProcessCsv(text, file.name);
     };
     reader.readAsText(file);
   };
 
   const handleLoadSample = () => {
-    setCsvText(SAMPLE_BITVAVO_CSV);
-    handleParse(SAMPLE_BITVAVO_CSV, 'bitvavo_trades_sample.csv');
+    handleProcessCsv(SAMPLE_BITVAVO_CSV, 'bitvavo_trades_sample.csv');
   };
 
   const handleExecuteImport = async () => {
@@ -108,10 +141,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
 
     // Filter rows based on selected mode
     let targetRows: ParsedCsvRow[] = [];
-    if (importMode === 'update_dates') {
-      // Include all rows from CSV so matched ones update date and new ones get inserted
-      targetRows = parseResult.rows;
-    } else if (importMode === 'replace_all') {
+    if (importMode === 'update_dates' || importMode === 'replace_all') {
       targetRows = parseResult.rows;
     } else {
       // add_new
@@ -119,11 +149,12 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
     }
 
     if (targetRows.length === 0) {
-      alert('Keine Transaktionen zum Importieren ausgewählt.');
+      setErrorMessage('Keine Transaktionen zum Importieren ausgewählt.');
       return;
     }
 
     setIsSubmitting(true);
+    setErrorMessage(null);
     try {
       // Map to PortfolioTransaction
       const transactionsToSubmit: PortfolioTransaction[] = targetRows.map((row, idx) => ({
@@ -146,7 +177,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
       if (importMode === 'update_dates') {
         msg = `Erfolgreich Kaufdaten für ${transactionsToSubmit.length} Transaktionen aktualisiert & synchronisiert!`;
       } else if (importMode === 'replace_all') {
-        msg = `Erfolgreich alle Bestände durch ${transactionsToSubmit.length} CSV-Transaktionen ersetzt!`;
+        msg = `Erfolgreich alle Bestände durch ${transactionsToSubmit.length} Transaktionen (${parseResult.totalBtcSum.toFixed(4)} BTC) ersetzt!`;
       } else {
         msg = `Erfolgreich ${transactionsToSubmit.length} neue Transaktionen hinzugefügt!`;
       }
@@ -160,7 +191,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
       }, 1500);
     } catch (err: any) {
       console.error('Import execution error:', err);
-      alert('Fehler beim Importieren: ' + (err?.message || 'Unbekannter Fehler'));
+      setErrorMessage('Fehler beim Importieren: ' + (err?.message || 'Unbekannter Fehler'));
       setIsSubmitting(false);
     }
   };
@@ -177,6 +208,14 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
       : parseResult.newCount > 0
     : false;
 
+  // Helper to get sample preview values for a column header
+  const getColPreview = (headerName: string | undefined): string => {
+    if (!rawInfo || !headerName || headerName.startsWith('__')) return '';
+    const col = rawInfo.columnPreviews.find((p) => p.header.toLowerCase() === headerName.toLowerCase());
+    if (!col || col.sampleValues.length === 0) return '';
+    return col.sampleValues.slice(0, 3).join(' | ');
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4 animate-in fade-in duration-200">
       <div className="bg-slate-900 border border-slate-700/80 rounded-3xl p-6 max-w-4xl w-full shadow-2xl flex flex-col max-h-[92vh]">
@@ -188,13 +227,13 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
-                <span>Bitcoin CSV-Import</span>
+                <span>Bitcoin CSV- & Excel-Import</span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                  Bitvavo & Exchanges
+                  Manuelle Spaltenprüfung
                 </span>
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Importiere deine echten Kauf- und Verkaufsdaten mit exakter historischer Datierung
+                Prüfe und weise die Spalten für BTC-Menge, Kaufdatum und Kurs vor dem Importieren exakt zu.
               </p>
             </div>
           </div>
@@ -212,6 +251,14 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
           <div className="mb-4 p-4 rounded-2xl bg-emerald-950/60 border border-emerald-500/50 flex items-center gap-3 text-emerald-300 text-xs animate-in zoom-in-95">
             <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
             <span className="font-semibold">{importSuccessMessage}</span>
+          </div>
+        )}
+
+        {/* Error Alert */}
+        {errorMessage && (
+          <div className="mb-4 p-4 rounded-2xl bg-rose-950/60 border border-rose-500/50 flex items-center gap-3 text-rose-300 text-xs animate-in zoom-in-95">
+            <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
+            <span className="font-semibold">{errorMessage}</span>
           </div>
         )}
 
@@ -258,10 +305,10 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                     <FileText className="w-6 h-6" />
                   </div>
                   <p className="text-sm font-semibold text-slate-200">
-                    Klicke hier oder ziehe deine Bitvavo-CSV hierher
+                    Klicke hier oder ziehe deine Excel/Bitvavo-CSV hierher
                   </p>
                   <p className="text-xs text-slate-500 mt-1">
-                    Liest Kaufdaten, Uhrzeiten, Kurse und Beträge zuverlässig aus
+                    Anschließend kannst du jede Spalte manuell prüfen und die berechnete Summe einsehen.
                   </p>
                 </div>
               ) : (
@@ -272,17 +319,17 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                   </label>
                   <textarea
                     rows={7}
-                    placeholder="Date,Time,Market,Side,Price,Amount,Total..."
+                    placeholder="Datum;Menge BTC;Kurs;Gesamt..."
                     value={csvText}
                     onChange={(e) => setCsvText(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 font-mono text-xs text-slate-200 focus:outline-none focus:border-amber-400"
                   />
                   <button
-                    onClick={() => handleParse(csvText, 'Eingefügter CSV-Text')}
+                    onClick={() => handleProcessCsv(csvText, 'Eingefügter CSV-Text')}
                     disabled={!csvText.trim()}
                     className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition disabled:opacity-40 cursor-pointer"
                   >
-                    CSV analysieren & Vorschau anzeigen
+                    CSV analysieren & Spalten prüfen
                   </button>
                 </div>
               )}
@@ -304,26 +351,26 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
               {/* Guarantees Box */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px] text-slate-400 pt-1">
                 <div className="flex items-start gap-2 bg-slate-950/40 p-3 rounded-xl border border-slate-800/60">
-                  <Calendar className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <Coins className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                   <div>
-                    <span className="text-slate-200 font-semibold block">Echtes Kaufdatum garantiert</span>
-                    Die App übernimmt das historische Kaufdatum aus der CSV – nicht das Importdatum.
+                    <span className="text-slate-200 font-semibold block">Präzise BTC-Mengen</span>
+                    Wähle die exakte Spalte mit deinen Bitcoin-Kaufmengen (z. B. 0.01306 BTC) ohne Zählfehler.
                   </div>
                 </div>
 
                 <div className="flex items-start gap-2 bg-slate-950/40 p-3 rounded-xl border border-slate-800/60">
-                  <Clock className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+                  <Calendar className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
                   <div>
-                    <span className="text-slate-200 font-semibold block">Chronologische Einsortierung</span>
-                    Transaktionen werden exakt nach Datum und Uhrzeit sortiert für korrekte Renditen und Steuerfristen.
+                    <span className="text-slate-200 font-semibold block">Historisches Kaufdatum</span>
+                    Die App übernimmt das historische Kaufdatum aus deiner Tabelle im deutschen Format (TT.MM.JJJJ).
                   </div>
                 </div>
               </div>
             </div>
           ) : (
-            /* Parse Result & Preview Area */
+            /* Parse Result, Column Mapping & Preview Area */
             <div className="space-y-4">
-              {/* Parse Summary Bar */}
+              {/* Parse Summary & Switch File Bar */}
               <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-950/80 p-3.5 rounded-2xl border border-slate-800">
                 <div className="space-y-0.5">
                   <div className="flex items-center gap-2">
@@ -331,35 +378,23 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                     <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
                       {parseResult.detectedFormat}
                     </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800/70 text-slate-400">
+                      Trennzeichen: <code className="text-amber-400 font-mono font-bold">{rawInfo?.delimiter === '\t' ? 'Tab' : rawInfo?.delimiter}</code>
+                    </span>
                   </div>
                   <div className="text-xs text-slate-400 flex flex-wrap items-center gap-2">
                     <span className="text-slate-200 font-semibold">
-                      {parseResult.totalRows} Transaktionen gefunden
+                      {parseResult.totalRows} Zeilen erkannt
                     </span>
-                    {parseResult.dateMismatchCount > 0 && (
-                      <span className="text-amber-400 font-semibold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
-                        {parseResult.dateMismatchCount} mit Importdatum korrigierbar
-                      </span>
-                    )}
-                    {parseResult.newCount > 0 && (
-                      <span className="text-emerald-400 font-semibold">
-                        +{parseResult.newCount} neu
-                      </span>
-                    )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setHideDuplicatesInPreview(!hideDuplicatesInPreview)}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition cursor-pointer"
-                  >
-                    {hideDuplicatesInPreview ? 'Alle anzeigen' : 'Nur Neue anzeigen'}
-                  </button>
-
-                  <button
                     onClick={() => {
                       setParseResult(null);
+                      setRawInfo(null);
+                      setMapping(null);
                       setCsvText('');
                     }}
                     className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition cursor-pointer"
@@ -369,14 +404,284 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                 </div>
               </div>
 
-              {/* Mode Selection Options (Answers user request) */}
+              {/* REAL-TIME CALCULATED TOTALS BANNER (Directly solves the 24 BTC vs 0.3136 BTC issue) */}
+              <div className={`p-4 rounded-2xl border transition-all ${
+                parseResult.totalBtcSum > 20
+                  ? 'bg-amber-950/30 border-amber-500/50'
+                  : 'bg-emerald-950/30 border-emerald-500/40'
+              }`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                      Live-Berechnung aus den gewählten Spalten
+                    </span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-black text-slate-100 font-mono tracking-tight">
+                        {parseResult.totalBtcSum.toFixed(4)} BTC
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        aus {parseResult.totalRows} Transaktionen
+                      </span>
+                    </div>
+                  </div>
+
+                  {parseResult.totalBtcSum > 20 ? (
+                    <div className="flex items-start gap-2 bg-amber-500/15 border border-amber-500/30 p-2.5 rounded-xl max-w-md text-amber-300 text-[11px]">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                      <div>
+                        <strong className="block font-bold">Achtung: Ungewöhnlich hoher Bestand ({parseResult.totalBtcSum.toFixed(2)} BTC)!</strong>
+                        Prüfe unten die Spalte <span className="underline font-bold">„Menge / BTC-Betrag“</span>. Oft wurde versehentlich eine Spalte wie „Anzahl“ (Wert 1) gewählt statt der echten BTC-Teilbeträge.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 px-3 py-2 rounded-xl text-emerald-300 text-xs font-semibold">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      <span>Plausibler Bitcoin-Bestand ({parseResult.totalBtcSum.toFixed(4)} BTC)</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* INTERACTIVE COLUMN MAPPING SECTION (Answers user requirement) */}
+              {rawInfo && mapping && (
+                <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <SlidersHorizontal className="w-4 h-4 text-amber-400" />
+                      <h4 className="text-xs font-bold text-slate-200">
+                        Manuelle Spaltenprüfung & Zuordnung
+                      </h4>
+                      <span className="text-[10px] text-slate-400">
+                        (Prüfe hier die Zuordnung deiner Excel-Spalten)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowMappingDetails(!showMappingDetails)}
+                      className="text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer"
+                    >
+                      <span>{showMappingDetails ? 'Details einklappen' : 'Spalten bearbeiten'}</span>
+                      {showMappingDetails ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+
+                  {showMappingDetails && (
+                    <div className="space-y-3 pt-1">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {/* 1. BTC Amount (HIGHLIGHTED & CRITICAL) */}
+                        <div className="p-3 rounded-xl bg-slate-900/90 border-2 border-amber-500/60 space-y-1.5 shadow-md">
+                          <label className="text-xs font-bold text-amber-300 flex items-center justify-between">
+                            <span className="flex items-center gap-1.5">
+                              <Coins className="w-3.5 h-3.5 text-amber-400" />
+                              Menge / BTC-Betrag *
+                            </span>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">
+                              WICHTIG
+                            </span>
+                          </label>
+                          <select
+                            value={mapping.colAmount}
+                            onChange={(e) => handleUpdateMapping({ colAmount: e.target.value })}
+                            className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-amber-400"
+                          >
+                            <option value="">-- Spalte auswählen --</option>
+                            {rawInfo.headers.map((h) => (
+                              <option key={h} value={h}>
+                                {h}
+                              </option>
+                            ))}
+                          </select>
+                          {/* Live Cell Value Preview */}
+                          {mapping.colAmount && (
+                            <div className="text-[10px] text-slate-400 pt-0.5 flex flex-col">
+                              <span className="text-slate-500">Zellvorschau:</span>
+                              <span className="font-mono text-amber-300/90 truncate font-semibold bg-slate-950/60 px-1.5 py-0.5 rounded border border-slate-800">
+                                {getColPreview(mapping.colAmount) || 'Keine Werte'}
+                              </span>
+                            </div>
+                          )}
+                          <p className="text-[10px] text-slate-400 leading-tight">
+                            Wähle die Spalte mit den Bruchteilen (z. B. 0.01306) – nicht „Anzahl“.
+                          </p>
+                        </div>
+
+                        {/* 2. Purchase Date */}
+                        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                          <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                            <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                            Kaufdatum *
+                          </label>
+                          <select
+                            value={mapping.colDate}
+                            onChange={(e) => handleUpdateMapping({ colDate: e.target.value })}
+                            className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg p-2 text-xs focus:outline-none focus:border-amber-400"
+                          >
+                            <option value="">-- Spalte auswählen --</option>
+                            {rawInfo.headers.map((h) => (
+                              <option key={h} value={h}>
+                                {h}
+                              </option>
+                            ))}
+                          </select>
+                          {mapping.colDate && (
+                            <div className="text-[10px] text-slate-400 pt-0.5 flex flex-col">
+                              <span className="text-slate-500">Zellvorschau:</span>
+                              <span className="font-mono text-cyan-300 truncate bg-slate-950/60 px-1.5 py-0.5 rounded border border-slate-800">
+                                {getColPreview(mapping.colDate) || 'Keine Werte'}
+                              </span>
+                            </div>
+                          )}
+                          <p className="text-[10px] text-slate-400 leading-tight">
+                            Datum des Kaufs (z. B. TT.MM.JJJJ oder JJJJ-MM-TT).
+                          </p>
+                        </div>
+
+                        {/* 3. Time (optional) */}
+                        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                          <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                            <Clock className="w-3.5 h-3.5 text-slate-400" />
+                            Uhrzeit (optional)
+                          </label>
+                          <select
+                            value={mapping.colTime}
+                            onChange={(e) => handleUpdateMapping({ colTime: e.target.value })}
+                            className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg p-2 text-xs focus:outline-none focus:border-amber-400"
+                          >
+                            <option value="__none__">[Keine separate Uhrzeit-Spalte]</option>
+                            {rawInfo.headers.map((h) => (
+                              <option key={h} value={h}>
+                                {h}
+                              </option>
+                            ))}
+                          </select>
+                          {mapping.colTime && mapping.colTime !== '__none__' && (
+                            <div className="text-[10px] text-slate-400 pt-0.5 flex flex-col">
+                              <span className="text-slate-500">Zellvorschau:</span>
+                              <span className="font-mono text-slate-300 truncate bg-slate-950/60 px-1.5 py-0.5 rounded border border-slate-800">
+                                {getColPreview(mapping.colTime)}
+                              </span>
+                            </div>
+                          )}
+                          <p className="text-[10px] text-slate-400 leading-tight">
+                            Falls Uhrzeit separat vorliegt (z. B. 14:30:00).
+                          </p>
+                        </div>
+
+                        {/* 4. Price / Kurs */}
+                        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                          <label className="text-xs font-bold text-slate-200">
+                            Kaufkurs / Preis pro BTC
+                          </label>
+                          <select
+                            value={mapping.colPrice}
+                            onChange={(e) => handleUpdateMapping({ colPrice: e.target.value })}
+                            className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg p-2 text-xs focus:outline-none focus:border-amber-400"
+                          >
+                            <option value="">[Aus Gesamtbetrag berechnen]</option>
+                            {rawInfo.headers.map((h) => (
+                              <option key={h} value={h}>
+                                {h}
+                              </option>
+                            ))}
+                          </select>
+                          {mapping.colPrice && (
+                            <div className="text-[10px] text-slate-400 pt-0.5 flex flex-col">
+                              <span className="text-slate-500">Zellvorschau:</span>
+                              <span className="font-mono text-slate-300 truncate bg-slate-950/60 px-1.5 py-0.5 rounded border border-slate-800">
+                                {getColPreview(mapping.colPrice)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 5. Total Cost / Gesamtbetrag */}
+                        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                          <label className="text-xs font-bold text-slate-200">
+                            Gesamtbetrag (EUR/USD)
+                          </label>
+                          <select
+                            value={mapping.colTotal}
+                            onChange={(e) => handleUpdateMapping({ colTotal: e.target.value })}
+                            className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg p-2 text-xs focus:outline-none focus:border-amber-400"
+                          >
+                            <option value="">[Aus Menge × Kurs berechnen]</option>
+                            {rawInfo.headers.map((h) => (
+                              <option key={h} value={h}>
+                                {h}
+                              </option>
+                            ))}
+                          </select>
+                          {mapping.colTotal && (
+                            <div className="text-[10px] text-slate-400 pt-0.5 flex flex-col">
+                              <span className="text-slate-500">Zellvorschau:</span>
+                              <span className="font-mono text-slate-300 truncate bg-slate-950/60 px-1.5 py-0.5 rounded border border-slate-800">
+                                {getColPreview(mapping.colTotal)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 6. Type / Transaktionsart */}
+                        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                          <label className="text-xs font-bold text-slate-200">
+                            Transaktionstyp
+                          </label>
+                          <select
+                            value={mapping.colType}
+                            onChange={(e) => handleUpdateMapping({ colType: e.target.value })}
+                            className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg p-2 text-xs focus:outline-none focus:border-amber-400"
+                          >
+                            <option value="__fixed_buy__">Alle als Kauf (BUY) festlegen</option>
+                            <option value="__fixed_sell__">Alle als Verkauf (SELL) festlegen</option>
+                            {rawInfo.headers.map((h) => (
+                              <option key={h} value={h}>
+                                Aus Spalte „{h}“ ermitteln
+                              </option>
+                            ))}
+                          </select>
+                          {mapping.colType && !mapping.colType.startsWith('__') && (
+                            <div className="text-[10px] text-slate-400 pt-0.5 flex flex-col">
+                              <span className="text-slate-500">Zellvorschau:</span>
+                              <span className="font-mono text-slate-300 truncate bg-slate-950/60 px-1.5 py-0.5 rounded border border-slate-800">
+                                {getColPreview(mapping.colType)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Mode Selection Options */}
               <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-2.5">
                 <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                   <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Wie sollen die Daten angewendet werden?</span>
+                  <span>Wie sollen die Daten in dein Portfolio übernommen werden?</span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setImportMode('replace_all')}
+                    className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                      importMode === 'replace_all'
+                        ? 'bg-amber-500/15 border-amber-500/60 text-amber-200 ring-1 ring-amber-500/30'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="block font-bold text-xs text-slate-100 flex items-center justify-between">
+                      <span>Komplett ersetzen</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">
+                        Empfohlen
+                      </span>
+                    </span>
+                    <span className="block text-[10px] mt-1 text-slate-400">
+                      Ersetzt bisherige Transaktionen komplett durch diese korrigierten {parseResult.rows.length} Einträge ({parseResult.totalBtcSum.toFixed(4)} BTC).
+                    </span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => setImportMode('update_dates')}
@@ -391,7 +696,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                       {importMode === 'update_dates' && <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
                     </span>
                     <span className="block text-[10px] mt-1 text-slate-400">
-                      Aktualisiert vorhandene Einträge mit dem echten Kaufdatum und fügt neue hinzu.
+                      Aktualisiert vorhandene Einträge mit dem Kaufdatum und fügt neue hinzu.
                     </span>
                   </button>
 
@@ -409,28 +714,27 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                       {importMode === 'add_new' && <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
                     </span>
                     <span className="block text-[10px] mt-1 text-slate-400">
-                      Vorhandene Einträge unberührt lassen, nur neue Zeilen importieren.
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setImportMode('replace_all')}
-                    className={`p-3 rounded-xl border text-left transition cursor-pointer ${
-                      importMode === 'replace_all'
-                        ? 'bg-amber-500/15 border-amber-500/60 text-amber-200'
-                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
-                    }`}
-                  >
-                    <span className="block font-bold text-xs text-slate-100 flex items-center justify-between">
-                      <span>Komplett ersetzen</span>
-                      {importMode === 'replace_all' && <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
-                    </span>
-                    <span className="block text-[10px] mt-1 text-slate-400">
-                      Ersetzt alle bestehenden Einträge durch diese CSV-Historie.
+                      Bestehende Bestände behalten und nur neue Zeilen anfügen.
                     </span>
                   </button>
                 </div>
+              </div>
+
+              {/* Preview Table Header */}
+              <div className="flex items-center justify-between pt-1">
+                <div className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                  <span>Tabellen-Vorschau der {displayedRows.length} Transaktionen</span>
+                  <span className="text-[10px] text-slate-400 font-normal">
+                    (Chronologisch sortiert, deutsches Kaufdatum)
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setHideDuplicatesInPreview(!hideDuplicatesInPreview)}
+                  className="text-xs text-slate-400 hover:text-slate-200 transition cursor-pointer"
+                >
+                  {hideDuplicatesInPreview ? 'Alle anzeigen' : 'Nur Neue anzeigen'}
+                </button>
               </div>
 
               {/* Preview Table */}
@@ -441,7 +745,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                       <tr>
                         <th className="py-2.5 px-3">Status</th>
                         <th className="py-2.5 px-3">Typ</th>
-                        <th className="py-2.5 px-3">Kaufdatum (CSV)</th>
+                        <th className="py-2.5 px-3">Kaufdatum</th>
                         <th className="py-2.5 px-3">Menge BTC</th>
                         <th className="py-2.5 px-3">Kurs (Orig.)</th>
                         <th className="py-2.5 px-3">Kurs ($)</th>
@@ -461,7 +765,11 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                           }
                         >
                           <td className="py-2 px-3 font-sans">
-                            {row.hasDateMismatch ? (
+                            {importMode === 'replace_all' ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">
+                                Wird übernommen
+                              </span>
+                            ) : row.hasDateMismatch ? (
                               <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">
                                 Datum wird aktualisiert
                               </span>
@@ -522,10 +830,10 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
               {/* Action Buttons */}
               <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
                 <span className="text-slate-400 text-[11px]">
-                  {importMode === 'update_dates'
+                  {importMode === 'replace_all'
+                    ? `Setzt das gesamte Portfolio auf diese ${parseResult.rows.length} Transaktionen (${parseResult.totalBtcSum.toFixed(4)} BTC).`
+                    : importMode === 'update_dates'
                     ? `Aktualisiert Kaufdaten & fügt neue Transaktionen ein (${parseResult.rows.length} Zeilen).`
-                    : importMode === 'replace_all'
-                    ? `Ersetzt alle Transaktionen durch die ${parseResult.rows.length} CSV-Einträge.`
                     : `${parseResult.newCount} neue Transaktionen zum Hinzufügen bereit.`}
                 </span>
 
@@ -545,11 +853,11 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                     <FileCheck2 className="w-4 h-4" />
                     <span>
                       {isSubmitting
-                        ? 'Speichere Kaufdaten...'
+                        ? 'Speichere Daten...'
+                        : importMode === 'replace_all'
+                        ? `Bestand durch ${parseResult.totalBtcSum.toFixed(4)} BTC ersetzen`
                         : importMode === 'update_dates'
                         ? 'Kaufdaten überschreiben & anwenden'
-                        : importMode === 'replace_all'
-                        ? 'Alles durch diese CSV ersetzen'
                         : `${parseResult.newCount} neue Zeilen importieren`}
                     </span>
                   </button>
