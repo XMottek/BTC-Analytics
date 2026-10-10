@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { PortfolioTransaction } from '../types';
-import { parseBitcoinCsv, CsvParseResult, ParsedCsvRow } from '../utils/csvParser';
+import { parseBitcoinCsv, CsvParseResult, ParsedCsvRow, formatGermanDate } from '../utils/csvParser';
 import { 
   Upload, 
   FileText, 
@@ -14,14 +14,20 @@ import {
   X,
   FileCheck2,
   Sparkles,
-  HelpCircle
+  HelpCircle,
+  Calendar,
+  RefreshCw,
+  Layers
 } from 'lucide-react';
 
 interface CsvImportModalProps {
   isOpen: boolean;
   onClose: () => void;
   existingTransactions: PortfolioTransaction[];
-  onImportConfirmed: (newTransactions: PortfolioTransaction[]) => Promise<void>;
+  onImportConfirmed: (
+    transactions: PortfolioTransaction[],
+    mode: 'update_dates' | 'add_new' | 'replace_all'
+  ) => Promise<void>;
   eurToUsdRate?: number;
 }
 
@@ -44,6 +50,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
   const [csvText, setCsvText] = useState('');
   const [fileName, setFileName] = useState<string | null>(null);
   const [parseResult, setParseResult] = useState<CsvParseResult | null>(null);
+  const [importMode, setImportMode] = useState<'update_dates' | 'add_new' | 'replace_all'>('update_dates');
   const [hideDuplicatesInPreview, setHideDuplicatesInPreview] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [importSuccessMessage, setImportSuccessMessage] = useState<string | null>(null);
@@ -56,6 +63,12 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
     setFileName(sourceName);
     const result = parseBitcoinCsv(text, existingTransactions, eurToUsdRate);
     setParseResult(result);
+    // Auto-select update_dates if any date mismatches or matches exist
+    if (result.dateMismatchCount > 0 || result.matchedCount > 0) {
+      setImportMode('update_dates');
+    } else {
+      setImportMode('add_new');
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -93,37 +106,58 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
   const handleExecuteImport = async () => {
     if (!parseResult) return;
 
-    // Filter only new non-duplicate rows
-    const nonDuplicates = parseResult.rows.filter((r) => !r.isDuplicate);
-    if (nonDuplicates.length === 0) {
-      alert('Alle Transaktionen in dieser Datei sind bereits in deinem Portfolio vorhanden.');
+    // Filter rows based on selected mode
+    let targetRows: ParsedCsvRow[] = [];
+    if (importMode === 'update_dates') {
+      // Include all rows from CSV so matched ones update date and new ones get inserted
+      targetRows = parseResult.rows;
+    } else if (importMode === 'replace_all') {
+      targetRows = parseResult.rows;
+    } else {
+      // add_new
+      targetRows = parseResult.rows.filter((r) => !r.isDuplicate && !r.matchedExistingTxId);
+    }
+
+    if (targetRows.length === 0) {
+      alert('Keine Transaktionen zum Importieren ausgewählt.');
       return;
     }
 
     setIsSubmitting(true);
     try {
       // Map to PortfolioTransaction
-      const newTransactions: PortfolioTransaction[] = nonDuplicates.map((row, idx) => ({
-        id: 'tx-imp-' + Date.now() + '-' + idx + Math.random().toString(36).substring(2, 6),
+      const transactionsToSubmit: PortfolioTransaction[] = targetRows.map((row, idx) => ({
+        id: row.matchedExistingTxId && importMode === 'update_dates'
+          ? row.matchedExistingTxId
+          : 'tx-imp-' + Date.now() + '-' + idx + Math.random().toString(36).substring(2, 6),
         type: row.type,
         amountBtc: row.amountBtc,
         pricePerBtcUsd: row.pricePerBtcUsd,
         feeUsd: row.feeUsd,
         date: row.date,
+        time: row.time,
+        timestamp: row.timestamp,
         note: row.note + ` (Kurs: ${row.currency === 'EUR' ? '€' : '$'}${Math.round(row.pricePerBtcOriginal).toLocaleString()})`,
       }));
 
-      await onImportConfirmed(newTransactions);
+      await onImportConfirmed(transactionsToSubmit, importMode);
 
-      setImportSuccessMessage(
-        `Erfolgreich ${newTransactions.length} neue Bitcoin-Transaktionen importiert (${parseResult.duplicateCount} Duplikate übersprungen)!`
-      );
+      let msg = '';
+      if (importMode === 'update_dates') {
+        msg = `Erfolgreich Kaufdaten für ${transactionsToSubmit.length} Transaktionen aktualisiert & synchronisiert!`;
+      } else if (importMode === 'replace_all') {
+        msg = `Erfolgreich alle Bestände durch ${transactionsToSubmit.length} CSV-Transaktionen ersetzt!`;
+      } else {
+        msg = `Erfolgreich ${transactionsToSubmit.length} neue Transaktionen hinzugefügt!`;
+      }
+
+      setImportSuccessMessage(msg);
 
       setTimeout(() => {
         setIsSubmitting(false);
         setImportSuccessMessage(null);
         onClose();
-      }, 1600);
+      }, 1500);
     } catch (err: any) {
       console.error('Import execution error:', err);
       alert('Fehler beim Importieren: ' + (err?.message || 'Unbekannter Fehler'));
@@ -137,9 +171,15 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
       : parseResult.rows
     : [];
 
+  const canSubmit = parseResult
+    ? importMode === 'replace_all' || importMode === 'update_dates'
+      ? parseResult.rows.length > 0
+      : parseResult.newCount > 0
+    : false;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4 animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-700/80 rounded-3xl p-6 max-w-3xl w-full shadow-2xl flex flex-col max-h-[90vh]">
+      <div className="bg-slate-900 border border-slate-700/80 rounded-3xl p-6 max-w-4xl w-full shadow-2xl flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="flex items-start justify-between border-b border-slate-800 pb-4 mb-4">
           <div className="flex items-center gap-3">
@@ -150,18 +190,18 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
               <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
                 <span>Bitcoin CSV-Import</span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                  Exchanges & Wallets
+                  Bitvavo & Exchanges
                 </span>
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Importiere deine getätigten BTC-Käufe und Verkäufe mit automatischer Duplikate-Erkennung
+                Importiere deine echten Kauf- und Verkaufsdaten mit exakter historischer Datierung
               </p>
             </div>
           </div>
 
           <button
             onClick={onClose}
-            className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition"
+            className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -183,7 +223,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
               <div className="flex items-center gap-2 bg-slate-950 p-1 rounded-xl border border-slate-800 w-fit">
                 <button
                   onClick={() => setTab('upload')}
-                  className={`px-3 py-1.5 rounded-lg font-medium transition ${
+                  className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer ${
                     tab === 'upload' ? 'bg-amber-500 text-slate-950 font-bold' : 'text-slate-400'
                   }`}
                 >
@@ -191,7 +231,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                 </button>
                 <button
                   onClick={() => setTab('paste')}
-                  className={`px-3 py-1.5 rounded-lg font-medium transition ${
+                  className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer ${
                     tab === 'paste' ? 'bg-amber-500 text-slate-950 font-bold' : 'text-slate-400'
                   }`}
                 >
@@ -221,7 +261,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                     Klicke hier oder ziehe deine Bitvavo-CSV hierher
                   </p>
                   <p className="text-xs text-slate-500 mt-1">
-                    Unterstützt .csv Exporte von Bitvavo, Kraken, Binance, Relai, Bison und Excel
+                    Liest Kaufdaten, Uhrzeiten, Kurse und Beträge zuverlässig aus
                   </p>
                 </div>
               ) : (
@@ -240,7 +280,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                   <button
                     onClick={() => handleParse(csvText, 'Eingefügter CSV-Text')}
                     disabled={!csvText.trim()}
-                    className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition disabled:opacity-40"
+                    className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition disabled:opacity-40 cursor-pointer"
                   >
                     CSV analysieren & Vorschau anzeigen
                   </button>
@@ -251,23 +291,23 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
               <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 text-slate-400">
                 <span className="flex items-center gap-1.5 text-slate-300">
                   <Sparkles className="w-4 h-4 text-amber-400" />
-                  Keine Bitvavo-Datei zur Hand? Teste mit einer realistischen Muster-Datei:
+                  Muster-Bitvavo CSV mit getrennten Spalten für Datum und Zeit testen:
                 </span>
                 <button
                   onClick={handleLoadSample}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold transition"
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold transition cursor-pointer"
                 >
-                  Muster-Bitvavo CSV testen
+                  Muster-CSV laden
                 </button>
               </div>
 
               {/* Guarantees Box */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px] text-slate-400 pt-1">
                 <div className="flex items-start gap-2 bg-slate-950/40 p-3 rounded-xl border border-slate-800/60">
-                  <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <Calendar className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                   <div>
-                    <span className="text-slate-200 font-semibold block">Duplikat-Schutz garantiert</span>
-                    Bereits im Portfolio vorhandene Transaktionen werden automatisch erkannt und nicht doppelt angelegt.
+                    <span className="text-slate-200 font-semibold block">Echtes Kaufdatum garantiert</span>
+                    Die App übernimmt das historische Kaufdatum aus der CSV – nicht das Importdatum.
                   </div>
                 </div>
 
@@ -275,7 +315,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                   <Clock className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
                   <div>
                     <span className="text-slate-200 font-semibold block">Chronologische Einsortierung</span>
-                    Neue Transaktionen werden exakt nach Datum und Uhrzeit in deine Transaktionshistorie eingereiht.
+                    Transaktionen werden exakt nach Datum und Uhrzeit sortiert für korrekte Renditen und Steuerfristen.
                   </div>
                 </div>
               </div>
@@ -292,21 +332,27 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                       {parseResult.detectedFormat}
                     </span>
                   </div>
-                  <div className="text-xs text-slate-400 flex items-center gap-3">
-                    <span className="text-emerald-400 font-semibold">
-                      +{parseResult.newCount} neue Transaktionen
+                  <div className="text-xs text-slate-400 flex flex-wrap items-center gap-2">
+                    <span className="text-slate-200 font-semibold">
+                      {parseResult.totalRows} Transaktionen gefunden
                     </span>
-                    <span>•</span>
-                    <span className="text-amber-400">
-                      {parseResult.duplicateCount} Duplikate (werden übersprungen)
-                    </span>
+                    {parseResult.dateMismatchCount > 0 && (
+                      <span className="text-amber-400 font-semibold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                        {parseResult.dateMismatchCount} mit Importdatum korrigierbar
+                      </span>
+                    )}
+                    {parseResult.newCount > 0 && (
+                      <span className="text-emerald-400 font-semibold">
+                        +{parseResult.newCount} neu
+                      </span>
+                    )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setHideDuplicatesInPreview(!hideDuplicatesInPreview)}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition"
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition cursor-pointer"
                   >
                     {hideDuplicatesInPreview ? 'Alle anzeigen' : 'Nur Neue anzeigen'}
                   </button>
@@ -316,9 +362,73 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                       setParseResult(null);
                       setCsvText('');
                     }}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition"
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition cursor-pointer"
                   >
                     Andere Datei wählen
+                  </button>
+                </div>
+              </div>
+
+              {/* Mode Selection Options (Answers user request) */}
+              <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-2.5">
+                <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Wie sollen die Daten angewendet werden?</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setImportMode('update_dates')}
+                    className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                      importMode === 'update_dates'
+                        ? 'bg-amber-500/15 border-amber-500/60 text-amber-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="block font-bold text-xs text-slate-100 flex items-center justify-between">
+                      <span>Kaufdaten überschreiben</span>
+                      {importMode === 'update_dates' && <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
+                    </span>
+                    <span className="block text-[10px] mt-1 text-slate-400">
+                      Aktualisiert vorhandene Einträge mit dem echten Kaufdatum und fügt neue hinzu.
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setImportMode('add_new')}
+                    className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                      importMode === 'add_new'
+                        ? 'bg-amber-500/15 border-amber-500/60 text-amber-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="block font-bold text-xs text-slate-100 flex items-center justify-between">
+                      <span>Nur Neue hinzufügen</span>
+                      {importMode === 'add_new' && <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
+                    </span>
+                    <span className="block text-[10px] mt-1 text-slate-400">
+                      Vorhandene Einträge unberührt lassen, nur neue Zeilen importieren.
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setImportMode('replace_all')}
+                    className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                      importMode === 'replace_all'
+                        ? 'bg-amber-500/15 border-amber-500/60 text-amber-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="block font-bold text-xs text-slate-100 flex items-center justify-between">
+                      <span>Komplett ersetzen</span>
+                      {importMode === 'replace_all' && <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
+                    </span>
+                    <span className="block text-[10px] mt-1 text-slate-400">
+                      Ersetzt alle bestehenden Einträge durch diese CSV-Historie.
+                    </span>
                   </button>
                 </div>
               </div>
@@ -331,10 +441,10 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                       <tr>
                         <th className="py-2.5 px-3">Status</th>
                         <th className="py-2.5 px-3">Typ</th>
-                        <th className="py-2.5 px-3">Datum</th>
+                        <th className="py-2.5 px-3">Kaufdatum (CSV)</th>
                         <th className="py-2.5 px-3">Menge BTC</th>
                         <th className="py-2.5 px-3">Kurs (Orig.)</th>
-                        <th className="py-2.5 px-3">Kurs (USD)</th>
+                        <th className="py-2.5 px-3">Kurs ($)</th>
                         <th className="py-2.5 px-3">Notiz</th>
                       </tr>
                     </thead>
@@ -343,15 +453,21 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                         <tr
                           key={i}
                           className={
-                            row.isDuplicate
-                              ? 'bg-amber-950/15 text-slate-500'
+                            row.hasDateMismatch
+                              ? 'bg-amber-500/5 hover:bg-amber-500/10 text-slate-200'
+                              : row.isDuplicate
+                              ? 'bg-slate-950/40 text-slate-400'
                               : 'hover:bg-slate-800/30 text-slate-200'
                           }
                         >
                           <td className="py-2 px-3 font-sans">
-                            {row.isDuplicate ? (
-                              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-semibold">
-                                Vorhanden
+                            {row.hasDateMismatch ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">
+                                Datum wird aktualisiert
+                              </span>
+                            ) : row.matchedExistingTxId ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 font-semibold">
+                                Bereits vorhanden
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">
@@ -375,7 +491,14 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                               {row.type === 'BUY' ? 'KAUF' : 'VERKAUF'}
                             </span>
                           </td>
-                          <td className="py-2 px-3 font-sans text-slate-300">{row.date}</td>
+                          <td className="py-2 px-3 font-sans text-slate-200 font-medium">
+                            <div>{row.germanDate}</div>
+                            {row.hasDateMismatch && row.existingDate && (
+                              <span className="text-[10px] text-amber-400/80 block">
+                                (bisher: {formatGermanDate(row.existingDate)})
+                              </span>
+                            )}
+                          </td>
                           <td className="py-2 px-3 text-slate-100 font-semibold">
                             {row.amountBtc.toFixed(6)} BTC
                           </td>
@@ -386,7 +509,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                           <td className="py-2 px-3 text-slate-400">
                             ${Math.round(row.pricePerBtcUsd).toLocaleString()}
                           </td>
-                          <td className="py-2 px-3 font-sans text-slate-400 text-[10px] truncate max-w-[120px]">
+                          <td className="py-2 px-3 font-sans text-slate-400 text-[10px] truncate max-w-[130px]">
                             {row.note}
                           </td>
                         </tr>
@@ -397,31 +520,37 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
               </div>
 
               {/* Action Buttons */}
-              <div className="flex items-center justify-between pt-2">
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
                 <span className="text-slate-400 text-[11px]">
-                  {parseResult.newCount > 0
-                    ? `Bereit zum Einfügen von ${parseResult.newCount} Transaktionen.`
-                    : 'Keine neuen Transaktionen zum Importieren.'}
+                  {importMode === 'update_dates'
+                    ? `Aktualisiert Kaufdaten & fügt neue Transaktionen ein (${parseResult.rows.length} Zeilen).`
+                    : importMode === 'replace_all'
+                    ? `Ersetzt alle Transaktionen durch die ${parseResult.rows.length} CSV-Einträge.`
+                    : `${parseResult.newCount} neue Transaktionen zum Hinzufügen bereit.`}
                 </span>
 
                 <div className="flex items-center gap-2">
                   <button
                     onClick={onClose}
-                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition"
+                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition cursor-pointer"
                   >
                     Abbrechen
                   </button>
 
                   <button
                     onClick={handleExecuteImport}
-                    disabled={isSubmitting || parseResult.newCount === 0}
+                    disabled={isSubmitting || !canSubmit}
                     className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/20 transition cursor-pointer disabled:opacity-40"
                   >
                     <FileCheck2 className="w-4 h-4" />
                     <span>
                       {isSubmitting
-                        ? 'Importiere...'
-                        : `${parseResult.newCount} Transaktionen einsortieren`}
+                        ? 'Speichere Kaufdaten...'
+                        : importMode === 'update_dates'
+                        ? 'Kaufdaten überschreiben & anwenden'
+                        : importMode === 'replace_all'
+                        ? 'Alles durch diese CSV ersetzen'
+                        : `${parseResult.newCount} neue Zeilen importieren`}
                     </span>
                   </button>
                 </div>

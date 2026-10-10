@@ -83,6 +83,8 @@ export interface PortfolioTransaction {
   pricePerBtcUsd: number;
   feeUsd: number;
   date: string;
+  time?: string;
+  timestamp?: number;
   note?: string;
 }
 
@@ -102,4 +104,33 @@ export interface TriggeredAlertNotification {
   message: string;
   timestamp: string;
   type: 'info' | 'warning' | 'bullish' | 'bearish';
+}
+
+export interface UserPortfolioMetrics {
+  totalBtc: number;
+  totalCostUsd: number;
+  totalCostEur: number;
+  avgBuyPrice: number;
+  avgBuyPriceEur: number;
+  totalValueUsd: number;
+  totalValueEur: number;
+  totalPnlUsd: number;
+  totalPnlEur: number;
+  totalPnlPercent: number;
+  realizedPnlUsd: number;
+  transactionCount: number;
+  hasDemoData: boolean;
+}
+
+export interface PersonalPortfolioAnalysis {
+  portfolioScore: number;
+  riskLevel: string;
+  headline: string;
+  summary: string;
+  dcaEvaluation: string;
+  actionSteps: string[];
+  taxGuidance: string;
+  bullCaseValueUsd: number;
+  bearCaseValueUsd: number;
+  updatedAt?: string;
 }

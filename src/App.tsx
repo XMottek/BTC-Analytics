@@ -12,7 +12,14 @@ import { PortfolioView } from './components/PortfolioView';
 import { AlertsManagerView } from './components/AlertsManagerView';
 import { AiChatDrawer } from './components/AiChatDrawer';
 import { AuthErrorModal } from './components/AuthErrorModal';
-import { MarketData, MacroSettings, MacroForecastResult, TriggeredAlertNotification } from './types';
+import { 
+  MarketData, 
+  MacroSettings, 
+  MacroForecastResult, 
+  TriggeredAlertNotification,
+  UserPortfolioMetrics,
+  PersonalPortfolioAnalysis
+} from './types';
 import { Sparkles, Shield, AlertCircle } from 'lucide-react';
 
 const FALLBACK_FORECAST: MacroForecastResult = {
@@ -108,6 +115,8 @@ function AppContent() {
   const [isLoadingForecast, setIsLoadingForecast] = useState(false);
   const [isAiDrawerOpen, setIsAiDrawerOpen] = useState(false);
   const [notifications, setNotifications] = useState<TriggeredAlertNotification[]>([]);
+  const [userPortfolioMetrics, setUserPortfolioMetrics] = useState<UserPortfolioMetrics | null>(null);
+  const [personalAnalysis, setPersonalAnalysis] = useState<PersonalPortfolioAnalysis | null>(null);
 
   // Fetch live market data
   const fetchMarket = async () => {
@@ -180,22 +189,30 @@ function AppContent() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
-        {activeTab === 'macro' && (
+        <div className={activeTab === 'macro' ? 'block' : 'hidden'}>
           <MacroForecastView
             marketData={marketData}
             forecast={forecast}
             isLoadingForecast={isLoadingForecast}
             onRefreshForecast={fetchForecast}
+            userPortfolioMetrics={userPortfolioMetrics}
+            personalAnalysis={personalAnalysis}
+            onNavigateToPortfolio={() => setActiveTab('portfolio')}
           />
-        )}
+        </div>
 
         {activeTab === 'chart' && (
           <ChartAnalysisView marketData={marketData} />
         )}
 
-        {activeTab === 'portfolio' && (
-          <PortfolioView marketData={marketData} />
-        )}
+        {/* Keep PortfolioView mounted in DOM so transactions & metrics are immediately available across tabs */}
+        <div className={activeTab === 'portfolio' ? 'block' : 'hidden'}>
+          <PortfolioView 
+            marketData={marketData} 
+            onMetricsChange={setUserPortfolioMetrics}
+            onPersonalAnalysisChange={setPersonalAnalysis}
+          />
+        </div>
 
         {activeTab === 'alerts' && (
           <AlertsManagerView

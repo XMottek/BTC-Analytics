@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MarketData, MacroSettings, MacroForecastResult } from '../types';
+import { MarketData, MacroSettings, MacroForecastResult, UserPortfolioMetrics, PersonalPortfolioAnalysis } from '../types';
 import { ScenarioChart } from './ScenarioChart';
 import { 
   Sparkles, 
@@ -16,7 +16,11 @@ import {
   ShieldAlert, 
   Target,
   ArrowRight,
-  Info
+  Info,
+  Wallet,
+  BrainCircuit,
+  ArrowUpRight,
+  PieChart
 } from 'lucide-react';
 
 interface MacroForecastViewProps {
@@ -24,6 +28,9 @@ interface MacroForecastViewProps {
   forecast: MacroForecastResult | null;
   isLoadingForecast: boolean;
   onRefreshForecast: (customSettings?: MacroSettings) => void;
+  userPortfolioMetrics?: UserPortfolioMetrics | null;
+  personalAnalysis?: PersonalPortfolioAnalysis | null;
+  onNavigateToPortfolio?: () => void;
 }
 
 export const MacroForecastView: React.FC<MacroForecastViewProps> = ({
@@ -31,6 +38,9 @@ export const MacroForecastView: React.FC<MacroForecastViewProps> = ({
   forecast,
   isLoadingForecast,
   onRefreshForecast,
+  userPortfolioMetrics,
+  personalAnalysis,
+  onNavigateToPortfolio,
 }) => {
   const [showConfig, setShowConfig] = useState(false);
   const [customMacro, setCustomMacro] = useState<MacroSettings>({
@@ -376,6 +386,163 @@ export const MacroForecastView: React.FC<MacroForecastViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* PERSONAL BITCOIN PORTFOLIO MACRO IMPACT & STRATEGY */}
+      {userPortfolioMetrics && userPortfolioMetrics.totalBtc > 0 ? (
+        <div className="rounded-2xl bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 p-6 border border-cyan-500/30 shadow-2xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 -mr-16 -mt-16 w-60 h-60 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-5 border-b border-slate-800 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
+                <Wallet className="w-6 h-6" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-lg font-bold text-white tracking-tight">
+                    Deine Bitcoin-Bestände im Makro-Kontext
+                  </h3>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-bold">
+                    Reales Portfolio
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 mt-0.5">
+                  <span className="font-mono text-slate-200 font-semibold">{userPortfolioMetrics.totalBtc.toFixed(4)} BTC</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Ø Einstieg: <span className="font-mono text-slate-200">${Math.round(userPortfolioMetrics.avgBuyPrice).toLocaleString()}</span> (≈ €{Math.round(userPortfolioMetrics.avgBuyPriceEur).toLocaleString()})</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{userPortfolioMetrics.transactionCount} Buchungen</span>
+                </div>
+              </div>
+            </div>
+
+            {onNavigateToPortfolio && (
+              <button
+                onClick={onNavigateToPortfolio}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-semibold border border-cyan-500/30 transition cursor-pointer"
+              >
+                <span>Im Portfolio verwalten</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Card 1: Reale Kaufkosten vs. Marktwert */}
+            <div className="bg-slate-950/70 p-4.5 rounded-xl border border-slate-800/80">
+              <span className="text-xs font-semibold text-slate-400 block mb-2">
+                1. Anschaffungswert vs. Heutiger Marktwert
+              </span>
+              <div className="space-y-2 font-mono text-xs">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Tatsächlich investiert:</span>
+                  <span className="text-slate-200 font-semibold">€{userPortfolioMetrics.totalCostEur.toLocaleString('de-DE', { maximumFractionDigits: 0 })} (${userPortfolioMetrics.totalCostUsd.toLocaleString('en-US', { maximumFractionDigits: 0 })})</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Aktueller Depotwert:</span>
+                  <span className="text-amber-400 font-bold">€{userPortfolioMetrics.totalValueEur.toLocaleString('de-DE', { maximumFractionDigits: 0 })} (${userPortfolioMetrics.totalValueUsd.toLocaleString('en-US', { maximumFractionDigits: 0 })})</span>
+                </div>
+                <div className="flex justify-between pt-1 border-t border-slate-800">
+                  <span className="text-slate-400">Unrealisierter Gewinn:</span>
+                  <span className={`font-bold ${userPortfolioMetrics.totalPnlUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {userPortfolioMetrics.totalPnlPercent >= 0 ? '+' : ''}{userPortfolioMetrics.totalPnlPercent.toFixed(1)}% ({userPortfolioMetrics.totalPnlUsd >= 0 ? '+' : ''}${Math.round(userPortfolioMetrics.totalPnlUsd).toLocaleString()})
+                  </span>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-2.5 leading-relaxed">
+                Dein Break-Even-Preis liegt bei ${Math.round(userPortfolioMetrics.avgBuyPrice).toLocaleString()}. {currentPrice >= userPortfolioMetrics.avgBuyPrice ? `Du bist mit +${((currentPrice - userPortfolioMetrics.avgBuyPrice)/userPortfolioMetrics.avgBuyPrice * 100).toFixed(1)}% in der Gewinnzone.` : 'Aktuell unter deinem Einstiegskurs.'}
+              </p>
+            </div>
+
+            {/* Card 2: Persönliche Szenario-Projektion */}
+            <div className="bg-slate-950/70 p-4.5 rounded-xl border border-slate-800/80">
+              <span className="text-xs font-semibold text-slate-400 block mb-2">
+                2. Szenario-Auswirkung auf deine Bestände (12M)
+              </span>
+              <div className="space-y-2 font-mono text-xs">
+                <div className="flex justify-between">
+                  <span className="text-emerald-400 flex items-center gap-1">🟢 Bull-Case (${((forecast?.scenarios.bull.target12M || 168000)/1000).toFixed(0)}k):</span>
+                  <span className="text-emerald-300 font-bold">${Math.round(userPortfolioMetrics.totalBtc * (forecast?.scenarios.bull.target12M || 168000)).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-cyan-400 flex items-center gap-1">🔵 Base-Case (${((forecast?.scenarios.base.target12M || 138000)/1000).toFixed(0)}k):</span>
+                  <span className="text-cyan-300 font-bold">${Math.round(userPortfolioMetrics.totalBtc * (forecast?.scenarios.base.target12M || 138000)).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-rose-400 flex items-center gap-1">🔴 Bear-Case (${((forecast?.scenarios.bear.target12M || 92000)/1000).toFixed(0)}k):</span>
+                  <span className="text-rose-300 font-semibold">${Math.round(userPortfolioMetrics.totalBtc * (forecast?.scenarios.bear.target12M || 92000)).toLocaleString()}</span>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-2.5 leading-relaxed">
+                Im Bull-Szenario würde dein Depot um weitere +${Math.round(userPortfolioMetrics.totalBtc * ((forecast?.scenarios.bull.target12M || 168000) - currentPrice)).toLocaleString()} anwachsen.
+              </p>
+            </div>
+
+            {/* Card 3: Personalisierte KI-Taktik */}
+            <div className="bg-slate-950/70 p-4.5 rounded-xl border border-slate-800/80">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-slate-400">
+                  3. Maßgeschneiderte Anleger-Taktik
+                </span>
+                {personalAnalysis && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 font-bold">
+                    Score {personalAnalysis.portfolioScore}/100
+                  </span>
+                )}
+              </div>
+              {personalAnalysis ? (
+                <div className="space-y-1.5 text-xs text-slate-300">
+                  <div className="font-semibold text-slate-100">{personalAnalysis.headline}</div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed line-clamp-3">
+                    {personalAnalysis.summary}
+                  </p>
+                  <div className="text-[11px] text-emerald-400 pt-1 font-medium">
+                    🛡️ {personalAnalysis.taxGuidance}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs text-slate-400 space-y-2">
+                  <p className="text-[11px]">
+                    Berechne deine persönliche DCA-Qualität und Steuervorteile direkt über das KI-Audit im Portfolio-Tab.
+                  </p>
+                  {onNavigateToPortfolio && (
+                    <button
+                      onClick={onNavigateToPortfolio}
+                      className="text-xs text-amber-400 hover:text-amber-300 font-medium inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      KI-Audit starten <ArrowRight className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-2xl bg-slate-900/40 p-5 border border-slate-800/80 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-slate-800 text-slate-400">
+              <Wallet className="w-5 h-5" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-slate-200">
+                Möchtest du diese Makro-Prognose auf deine eigenen Bitcoin-Bestände anwenden?
+              </h4>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Importiere deine getätigten Käufe im Portfolio-Tab, um hier deinen individuellen Break-Even-Kurs und persönliche Szenarien zu sehen.
+              </p>
+            </div>
+          </div>
+          {onNavigateToPortfolio && (
+            <button
+              onClick={onNavigateToPortfolio}
+              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow"
+            >
+              Transaktionen importieren / verwalten
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 12-Month Projected Path Chart */}
       {forecast && (
