@@ -7,7 +7,8 @@ import {
   ColumnMapping,
   CsvParseResult, 
   ParsedCsvRow, 
-  formatGermanDate 
+  formatGermanDate,
+  SAMPLE_BLOCKPIT_24_CSV
 } from '../utils/csvParser';
 import { 
   Upload, 
@@ -48,6 +49,14 @@ const SAMPLE_BITVAVO_CSV = `Date,Time,Market,Side,Price,Amount,Total,Fee,Fee Cur
 2024-06-18,14:30:15,BTC-EUR,buy,61200.00,0.05000000,3060.00,4.59,EUR
 2024-08-05,18:20:44,BTC-EUR,buy,49500.00,0.12000000,5940.00,8.91,EUR
 2024-10-15,11:05:01,BTC-EUR,sell,62800.00,0.04000000,2512.00,3.77,EUR`;
+
+const SAMPLE_BLOCKPIT_CSV = `Date (UTC),Integration Name,Label,Outgoing Asset,Outgoing Amount,Incoming Asset,Incoming Amount,Fee Asset,Fee Amount,Trx. ID
+2023-10-15 14:22:00,Bitvavo,Trade,EUR,500.00,BTC,0.01850000,EUR,1.25,BP-1001
+2023-12-01 09:30:15,Bitvavo,Trade,EUR,750.00,BTC,0.02150000,EUR,1.80,BP-1002
+2024-02-14 11:45:00,Relai,Trade,EUR,1200.00,BTC,0.02600000,EUR,3.00,BP-1003
+2024-04-10 16:10:20,Bitvavo,Trade,EUR,2000.00,BTC,0.03250000,EUR,5.00,BP-1004
+2024-07-22 18:05:44,Bitvavo,Trade,EUR,3500.00,BTC,0.05500000,EUR,8.75,BP-1005
+2024-11-05 13:12:30,Bitvavo,Trade,EUR,4500.00,BTC,0.06500000,EUR,11.20,BP-1006`;
 
 export const CsvImportModal: React.FC<CsvImportModalProps> = ({
   isOpen,
@@ -164,6 +173,9 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
         type: row.type,
         amountBtc: row.amountBtc,
         pricePerBtcUsd: row.pricePerBtcUsd,
+        pricePerBtcEur: row.pricePerBtcEur,
+        totalCostOriginal: row.totalCostEur,
+        currency: row.currency,
         feeUsd: row.feeUsd,
         date: row.date,
         time: row.time,
@@ -305,21 +317,21 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                     <FileText className="w-6 h-6" />
                   </div>
                   <p className="text-sm font-semibold text-slate-200">
-                    Klicke hier oder ziehe deine Excel/Bitvavo-CSV hierher
+                    Klicke hier oder ziehe deine Blockpit, Bitvavo oder Excel-CSV hierher
                   </p>
                   <p className="text-xs text-slate-500 mt-1">
-                    Anschließend kannst du jede Spalte manuell prüfen und die berechnete Summe einsehen.
+                    Unterstützt automatisch Blockpit Tax-Exporte, Bitvavo und benutzerdefinierte Excel-Tabellen.
                   </p>
                 </div>
               ) : (
                 /* Paste Text Area */
                 <div className="space-y-2">
                   <label className="block text-slate-400 font-medium">
-                    CSV-Inhalt einfügen:
+                    CSV-Inhalt einfügen (Blockpit, Bitvavo oder Excel):
                   </label>
                   <textarea
                     rows={7}
-                    placeholder="Datum;Menge BTC;Kurs;Gesamt..."
+                    placeholder="Date (UTC),Integration Name,Label,Outgoing Asset,Outgoing Amount,Incoming Asset,Incoming Amount..."
                     value={csvText}
                     onChange={(e) => setCsvText(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 font-mono text-xs text-slate-200 focus:outline-none focus:border-amber-400"
@@ -335,17 +347,26 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
               )}
 
               {/* Sample loader */}
-              <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 text-slate-400">
-                <span className="flex items-center gap-1.5 text-slate-300">
-                  <Sparkles className="w-4 h-4 text-amber-400" />
-                  Muster-Bitvavo CSV mit getrennten Spalten für Datum und Zeit testen:
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 text-slate-400">
+                <span className="flex items-center gap-1.5 text-slate-300 text-xs">
+                  <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+                  Musterdaten direkt zum Testen laden:
                 </span>
-                <button
-                  onClick={handleLoadSample}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold transition cursor-pointer"
-                >
-                  Muster-CSV laden
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => handleProcessCsv(SAMPLE_BLOCKPIT_24_CSV, 'blockpit_24_btc_kaeufe.csv')}
+                    className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-bold transition cursor-pointer flex items-center gap-1.5"
+                    title="Exakt 24 Käufe mit insgesamt 0.3136 BTC und ~13.237 € Investition"
+                  >
+                    <span>Blockpit (24 Käufe • 0.3136 BTC)</span>
+                  </button>
+                  <button
+                    onClick={() => handleProcessCsv(SAMPLE_BITVAVO_CSV, 'bitvavo_trades_sample.csv')}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
+                  >
+                    Bitvavo Muster
+                  </button>
+                </div>
               </div>
 
               {/* Guarantees Box */}
@@ -404,39 +425,69 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                 </div>
               </div>
 
-              {/* REAL-TIME CALCULATED TOTALS BANNER (Directly solves the 24 BTC vs 0.3136 BTC issue) */}
+              {/* REAL-TIME CALCULATED TOTALS BANNER (Shows both BTC holdings and Investiertes Kapital) */}
               <div className={`p-4 rounded-2xl border transition-all ${
                 parseResult.totalBtcSum > 20
                   ? 'bg-amber-950/30 border-amber-500/50'
                   : 'bg-emerald-950/30 border-emerald-500/40'
               }`}>
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
-                    <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                      Live-Berechnung aus den gewählten Spalten
-                    </span>
-                    <div className="flex items-baseline gap-2 mt-1">
-                      <span className="text-2xl font-black text-slate-100 font-mono tracking-tight">
-                        {parseResult.totalBtcSum.toFixed(4)} BTC
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">
+                        Bitcoin Gesamtbestand
                       </span>
-                      <span className="text-xs text-slate-400">
-                        aus {parseResult.totalRows} Transaktionen
+                      <div className="flex items-baseline gap-1.5 mt-0.5">
+                        <span className="text-xl font-black text-slate-100 font-mono tracking-tight">
+                          {parseResult.totalBtcSum.toFixed(4)} BTC
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          ({parseResult.totalRows} Käufe)
+                        </span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] font-semibold text-cyan-400 uppercase tracking-wider block">
+                        Investiertes Kapital (Kaufkosten)
                       </span>
+                      <div className="flex items-baseline gap-1.5 mt-0.5">
+                        <span className="text-xl font-black text-cyan-300 font-mono tracking-tight">
+                          €{parseResult.totalCostEurSum.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                        <span className="text-[11px] text-slate-400 font-mono">
+                          (≈ ${parseResult.totalCostUsdSum.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })})
+                        </span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] font-semibold text-amber-400 uppercase tracking-wider block">
+                        Ø-Einstandskurs
+                      </span>
+                      <div className="flex items-baseline gap-1 mt-0.5">
+                        <span className="text-lg font-bold text-amber-300 font-mono tracking-tight">
+                          €{Math.round(parseResult.totalBtcSum > 0 ? parseResult.totalCostEurSum / parseResult.totalBtcSum : 0).toLocaleString('de-DE')}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          / BTC
+                        </span>
+                      </div>
                     </div>
                   </div>
 
                   {parseResult.totalBtcSum > 20 ? (
-                    <div className="flex items-start gap-2 bg-amber-500/15 border border-amber-500/30 p-2.5 rounded-xl max-w-md text-amber-300 text-[11px]">
+                    <div className="flex items-start gap-2 bg-amber-500/15 border border-amber-500/30 p-2.5 rounded-xl max-w-xs text-amber-300 text-[11px]">
                       <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
                       <div>
                         <strong className="block font-bold">Achtung: Ungewöhnlich hoher Bestand ({parseResult.totalBtcSum.toFixed(2)} BTC)!</strong>
-                        Prüfe unten die Spalte <span className="underline font-bold">„Menge / BTC-Betrag“</span>. Oft wurde versehentlich eine Spalte wie „Anzahl“ (Wert 1) gewählt statt der echten BTC-Teilbeträge.
+                        Prüfe unten die Spalte <span className="underline font-bold">„Menge / BTC-Betrag“</span> (z. B. 0.013 statt 1).
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 px-3 py-2 rounded-xl text-emerald-300 text-xs font-semibold">
+                    <div className="flex items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 px-3 py-2 rounded-xl text-emerald-300 text-xs font-semibold shrink-0">
                       <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                      <span>Plausibler Bitcoin-Bestand ({parseResult.totalBtcSum.toFixed(4)} BTC)</span>
+                      <span>{parseResult.totalBtcSum.toFixed(4)} BTC bereit zum Übernehmen</span>
                     </div>
                   )}
                 </div>

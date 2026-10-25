@@ -8,9 +8,12 @@ export interface ParsedCsvRow {
   type: 'BUY' | 'SELL';
   amountBtc: number;
   pricePerBtcUsd: number;
+  pricePerBtcEur: number;
   pricePerBtcOriginal: number;
   currency: 'EUR' | 'USD';
   feeUsd: number;
+  totalCostEur: number;
+  totalCostUsd: number;
   note: string;
   externalId?: string;
   fingerprint: string;
@@ -25,6 +28,8 @@ export interface CsvParseResult {
   totalRows: number;
   totalBtcSum: number; // Sum of all BTC amounts parsed
   totalCostOriginalSum: number;
+  totalCostEurSum: number;
+  totalCostUsdSum: number;
   duplicateCount: number;
   newCount: number;
   matchedCount: number;
@@ -349,8 +354,8 @@ export function analyzeCsvRaw(csvContent: string): RawCsvInfo {
     });
 
     const isLikelyBtcAmount = 
-      (lowerHeader.includes('btc') || lowerHeader.includes('menge') || lowerHeader.includes('amount') || lowerHeader.includes('aantal') || lowerHeader.includes('filled')) &&
-      !isLikelyCounter;
+      (lowerHeader.includes('btc') || lowerHeader.includes('menge') || lowerHeader.includes('amount') || lowerHeader.includes('aantal') || lowerHeader.includes('filled') || lowerHeader.includes('incoming amount') || lowerHeader.includes('eingehende menge')) &&
+      !isLikelyCounter && !lowerHeader.includes('fee');
 
     const isLikelyDate = lowerHeader.includes('datum') || lowerHeader.includes('date') || lowerHeader.includes('zeit') || lowerHeader.includes('time') || lowerHeader.includes('created');
     const isLikelyPrice = lowerHeader.includes('kurs') || lowerHeader.includes('preis') || lowerHeader.includes('price') || lowerHeader.includes('prijs') || lowerHeader.includes('rate');
@@ -359,7 +364,7 @@ export function analyzeCsvRaw(csvContent: string): RawCsvInfo {
       header,
       index: idx,
       sampleValues,
-      isLikelyBtcAmount: isLikelyBtcAmount || (hasDecimalPointOrComma && hasSmallDecimals && !isLikelyPrice && !isLikelyDate),
+      isLikelyBtcAmount: isLikelyBtcAmount || (hasDecimalPointOrComma && hasSmallDecimals && !isLikelyPrice && !isLikelyDate && !lowerHeader.includes('fee')),
       isLikelyCounter,
       isLikelyDate,
       isLikelyPrice,
@@ -385,29 +390,41 @@ export function analyzeCsvRaw(csvContent: string): RawCsvInfo {
   if (btcHeader) {
     bestAmountHeader = btcHeader;
   } else {
-    // 2. Column identified as isLikelyBtcAmount
-    const likelyCol = columnPreviews.find((p) => p.isLikelyBtcAmount && !p.isLikelyCounter);
-    if (likelyCol) {
-      bestAmountHeader = likelyCol.header;
+    // 2. Blockpit Incoming Amount (for purchases of BTC)
+    const blockpitIncomingAmount = rawHeaders.find((h) => {
+      const lh = h.toLowerCase();
+      return (lh.includes('incoming amount') || lh.includes('eingehende menge') || lh.includes('incoming_amount')) && !lh.includes('fee');
+    });
+
+    if (blockpitIncomingAmount) {
+      bestAmountHeader = blockpitIncomingAmount;
     } else {
-      // 3. Fallback to keyword matching, excluding 'anzahl'
-      bestAmountHeader = findBestHeader('amount', 'menge', 'aantal', 'filled', 'quantity', 'volume', 'size');
-      if (!bestAmountHeader) {
-        bestAmountHeader = findBestHeader('anzahl');
+      // 3. Column identified as isLikelyBtcAmount
+      const likelyCol = columnPreviews.find((p) => p.isLikelyBtcAmount && !p.isLikelyCounter);
+      if (likelyCol) {
+        bestAmountHeader = likelyCol.header;
+      } else {
+        // 4. Fallback to keyword matching, excluding 'anzahl'
+        bestAmountHeader = findBestHeader('amount', 'menge', 'aantal', 'filled', 'quantity', 'volume', 'size');
+        if (!bestAmountHeader) {
+          bestAmountHeader = findBestHeader('anzahl');
+        }
       }
     }
   }
 
-  // Date column
-  const bestDateHeader = findBestHeader('datum', 'date', 'transactiedatum', 'trade date', 'order date', 'kaufdatum', 'ausführung', 'zeitstempel', 'timestamp', 'datetime', 'created');
+  // Date column (Blockpit uses 'Date (UTC)' or 'Date')
+  const bestDateHeader = findBestHeader('date (utc)', 'datum', 'date', 'transactiedatum', 'trade date', 'order date', 'kaufdatum', 'ausführung', 'zeitstempel', 'timestamp', 'datetime', 'created');
   const bestTimeHeader = findBestHeader('time', 'tijd', 'uhrzeit', 'time_utc', 'zeit');
-  const bestTypeHeader = findBestHeader('type', 'typ', 'side', 'zijde', 'action', 'art', 'transaktion');
+  // Type column (Blockpit uses 'Label' or 'Type')
+  const bestTypeHeader = findBestHeader('label', 'type', 'typ', 'side', 'zijde', 'action', 'art', 'transaktion');
   const bestPriceHeader = findBestHeader('kurs', 'preis', 'price', 'prijs', 'rate', 'unit price', 'kaufkurs');
-  const bestTotalHeader = findBestHeader('gesamt', 'total', 'totaal', 'wert', 'cost', 'kosten', 'subtotal', 'betrag');
-  const bestFeeHeader = findBestHeader('fee', 'gebühr', 'gebuehr', 'kosten', 'commission');
-  const bestMarketHeader = findBestHeader('market', 'markt', 'pair', 'handelspaar', 'symbol');
-  const bestIdHeader = findBestHeader('id', 'order id', 'order_id', 'tx id', 'transaction id', 'transaktions-id', 'external id');
-  const bestCurrencyHeader = findBestHeader('currency', 'valuta', 'währung', 'fiat');
+  // Total cost column (Blockpit uses 'Outgoing Amount' in EUR/USD for purchases)
+  const bestTotalHeader = findBestHeader('outgoing amount', 'ausgehende menge', 'outgoing_amount', 'gesamt', 'total', 'totaal', 'wert', 'cost', 'kosten', 'subtotal', 'betrag');
+  const bestFeeHeader = findBestHeader('fee amount', 'fee', 'gebühr', 'gebuehr', 'kosten', 'commission');
+  const bestMarketHeader = findBestHeader('incoming asset', 'eingehendes asset', 'market', 'markt', 'pair', 'handelspaar', 'symbol');
+  const bestIdHeader = findBestHeader('trx. id', 'trx id', 'transaction id', 'tx id', 'id', 'order id', 'order_id', 'transaktions-id', 'external id');
+  const bestCurrencyHeader = findBestHeader('outgoing asset', 'ausgehendes asset', 'fee asset', 'currency', 'valuta', 'währung', 'fiat');
 
   return {
     headers: rawHeaders,
@@ -456,6 +473,8 @@ export function parseBitcoinCsvWithMapping(
       totalRows: 0,
       totalBtcSum: 0,
       totalCostOriginalSum: 0,
+      totalCostEurSum: 0,
+      totalCostUsdSum: 0,
       duplicateCount: 0,
       newCount: 0,
       matchedCount: 0,
@@ -497,6 +516,8 @@ export function parseBitcoinCsvWithMapping(
       totalRows: 0,
       totalBtcSum: 0,
       totalCostOriginalSum: 0,
+      totalCostEurSum: 0,
+      totalCostUsdSum: 0,
       duplicateCount: 0,
       newCount: 0,
       matchedCount: 0,
@@ -509,11 +530,32 @@ export function parseBitcoinCsvWithMapping(
   // Format label
   let detectedFormat = 'Benutzerdefinierter CSV-Import';
   const headersJoined = headers.join(' ').toLowerCase();
-  if (headersJoined.includes('bitvavo') || (headersJoined.includes('market') && headersJoined.includes('side'))) {
+  const isBlockpit = headersJoined.includes('incoming asset') || headersJoined.includes('outgoing asset') || (headersJoined.includes('date (utc)') && headersJoined.includes('integration name')) || headersJoined.includes('blockpit');
+  if (isBlockpit) {
+    detectedFormat = 'Blockpit Tax-Export';
+  } else if (headersJoined.includes('bitvavo') || (headersJoined.includes('market') && headersJoined.includes('side'))) {
     detectedFormat = 'Bitvavo Trade-Export';
   } else if (headersJoined.includes('datum') && headersJoined.includes('kurs')) {
     detectedFormat = 'Excel-Krypto-Portfolio';
   }
+
+  // Find incoming/outgoing asset and amount columns for Blockpit (German & English)
+  const incomingAssetIdx = headers.findIndex((h) => {
+    const s = h.toLowerCase();
+    return s.includes('incoming asset') || s.includes('eingehendes asset') || s.includes('asset eingehend') || s.includes('kauf-asset');
+  });
+  const outgoingAssetIdx = headers.findIndex((h) => {
+    const s = h.toLowerCase();
+    return s.includes('outgoing asset') || s.includes('ausgehendes asset') || s.includes('asset ausgehend') || s.includes('verkauf-asset');
+  });
+  const incomingAmountIdx = headers.findIndex((h) => {
+    const s = h.toLowerCase();
+    return (s.includes('incoming amount') || s.includes('eingehende menge') || s.includes('eingehender betrag') || s.includes('eingangsmenge') || s.includes('incoming_amount')) && !s.includes('fee');
+  });
+  const outgoingAmountIdx = headers.findIndex((h) => {
+    const s = h.toLowerCase();
+    return (s.includes('outgoing amount') || s.includes('ausgehende menge') || s.includes('ausgehender betrag') || s.includes('ausgangsmenge') || s.includes('outgoing_amount')) && !s.includes('fee');
+  });
 
   // Build index of existing transactions for duplicate and mismatch detection
   const existingFingerprints = new Set<string>();
@@ -530,6 +572,8 @@ export function parseBitcoinCsvWithMapping(
   let dateMismatchCount = 0;
   let totalBtcSum = 0;
   let totalCostOriginalSum = 0;
+  let totalCostEurSum = 0;
+  let totalCostUsdSum = 0;
 
   for (let i = 1; i < lines.length; i++) {
     const tokens = splitCsvRow(lines[i], delimiter);
@@ -538,7 +582,7 @@ export function parseBitcoinCsvWithMapping(
     // Filter by Market if present
     if (colMarketIdx !== -1) {
       const marketVal = (tokens[colMarketIdx] || '').toUpperCase();
-      if (marketVal && !marketVal.includes('BTC') && !marketVal.includes('XBT')) {
+      if (marketVal && !marketVal.includes('BTC') && !marketVal.includes('XBT') && !marketVal.includes('BITCOIN')) {
         continue;
       }
     }
@@ -556,7 +600,20 @@ export function parseBitcoinCsvWithMapping(
       type = 'SELL';
     } else if (colTypeIdx !== -1) {
       const typeStr = (tokens[colTypeIdx] || '').toLowerCase();
-      if (typeStr.includes('sell') || typeStr.includes('verkauf') || typeStr.includes('verkauft') || typeStr.includes('sold') || typeStr.includes('verkoop')) {
+      // Blockpit labels: 'trade', 'buy', 'deposit', 'withdrawal', etc.
+      // Also check if outgoing asset is BTC (which means SELL) or incoming asset is BTC (which means BUY)
+      if (outgoingAssetIdx !== -1 && incomingAssetIdx !== -1) {
+        const outAsset = (tokens[outgoingAssetIdx] || '').toUpperCase();
+        const inAsset = (tokens[incomingAssetIdx] || '').toUpperCase();
+        if (outAsset.includes('BTC') || outAsset.includes('XBT') || outAsset.includes('BITCOIN')) {
+          type = 'SELL';
+        } else if (inAsset.includes('BTC') || inAsset.includes('XBT') || inAsset.includes('BITCOIN')) {
+          type = 'BUY';
+        } else {
+          // Neither incoming nor outgoing is BTC -> skip this row
+          continue;
+        }
+      } else if (typeStr.includes('sell') || typeStr.includes('verkauf') || typeStr.includes('verkauft') || typeStr.includes('sold') || typeStr.includes('verkoop') || typeStr.includes('withdrawal')) {
         type = 'SELL';
       } else {
         type = 'BUY';
@@ -564,17 +621,39 @@ export function parseBitcoinCsvWithMapping(
     }
 
     // Amount BTC
-    let amountBtc = colAmountIdx !== -1 ? Math.abs(parseFlexibleNumber(tokens[colAmountIdx])) : 0;
+    let amountBtc = 0;
+    if (colAmountIdx !== -1) {
+      amountBtc = Math.abs(parseFlexibleNumber(tokens[colAmountIdx]));
+    } else if (incomingAmountIdx !== -1 && outgoingAmountIdx !== -1) {
+      // If Blockpit export and user didn't specify amount column:
+      // If BUY, BTC amount is incoming amount. If SELL, BTC amount is outgoing amount.
+      amountBtc = type === 'BUY'
+        ? Math.abs(parseFlexibleNumber(tokens[incomingAmountIdx]))
+        : Math.abs(parseFlexibleNumber(tokens[outgoingAmountIdx]));
+    }
 
     // Price & Total
     let rawPrice = colPriceIdx !== -1 ? parseFlexibleNumber(tokens[colPriceIdx]) : 0;
-    const rawTotal = colTotalIdx !== -1 ? parseFlexibleNumber(tokens[colTotalIdx]) : 0;
+    let rawTotal = colTotalIdx !== -1 ? parseFlexibleNumber(tokens[colTotalIdx]) : 0;
+
+    // Blockpit total cost fallback:
+    // When buying BTC, outgoing amount is the fiat (EUR / USD) spent.
+    if (rawTotal === 0 && outgoingAmountIdx !== -1 && incomingAssetIdx !== -1) {
+      const inAsset = (tokens[incomingAssetIdx] || '').toUpperCase();
+      if (inAsset.includes('BTC') || inAsset.includes('XBT') || inAsset.includes('BITCOIN')) {
+        rawTotal = parseFlexibleNumber(tokens[outgoingAmountIdx]);
+      }
+    } else if (rawTotal === 0 && outgoingAmountIdx !== -1 && type === 'BUY') {
+      rawTotal = parseFlexibleNumber(tokens[outgoingAmountIdx]);
+    }
 
     // Calculate missing price or amount if total exists
     if (rawPrice === 0 && rawTotal > 0 && amountBtc > 0) {
       rawPrice = rawTotal / amountBtc;
     } else if (amountBtc === 0 && rawTotal > 0 && rawPrice > 0) {
       amountBtc = rawTotal / rawPrice;
+    } else if (rawTotal === 0 && rawPrice > 0 && amountBtc > 0) {
+      rawTotal = rawPrice * amountBtc;
     }
 
     if (amountBtc <= 0 || rawPrice <= 0) {
@@ -590,11 +669,15 @@ export function parseBitcoinCsvWithMapping(
     } else {
       const currToken = colCurrencyIdx !== -1 ? (tokens[colCurrencyIdx] || '').toUpperCase() : '';
       const marketToken = colMarketIdx !== -1 ? (tokens[colMarketIdx] || '').toUpperCase() : '';
-      isEur = currToken.includes('EUR') || marketToken.includes('EUR') || mapping.colCurrency === '__eur__' || detectedFormat.includes('Excel') || detectedFormat.includes('Bitvavo');
+      const outAssetToken = outgoingAssetIdx !== -1 ? (tokens[outgoingAssetIdx] || '').toUpperCase() : '';
+      isEur = currToken.includes('EUR') || marketToken.includes('EUR') || outAssetToken.includes('EUR') || mapping.colCurrency === '__eur__' || detectedFormat.includes('Excel') || detectedFormat.includes('Bitvavo') || detectedFormat.includes('Blockpit');
     }
 
     const currency: 'EUR' | 'USD' = isEur ? 'EUR' : 'USD';
     const pricePerBtcUsd = isEur ? rawPrice * eurToUsdRate : rawPrice;
+    const pricePerBtcEur = isEur ? rawPrice : rawPrice / eurToUsdRate;
+    const totalCostEur = amountBtc * pricePerBtcEur;
+    const totalCostUsd = amountBtc * pricePerBtcUsd;
 
     // Fee
     let feeUsd = colFeeIdx !== -1 ? parseFlexibleNumber(tokens[colFeeIdx]) : 0;
@@ -638,6 +721,8 @@ export function parseBitcoinCsvWithMapping(
 
     totalBtcSum += (type === 'BUY' ? amountBtc : -amountBtc);
     totalCostOriginalSum += amountBtc * rawPrice;
+    totalCostEurSum += (type === 'BUY' ? totalCostEur : -totalCostEur);
+    totalCostUsdSum += (type === 'BUY' ? totalCostUsd : -totalCostUsd);
 
     parsedRows.push({
       date: dateStr,
@@ -647,9 +732,12 @@ export function parseBitcoinCsvWithMapping(
       type,
       amountBtc,
       pricePerBtcUsd,
+      pricePerBtcEur,
       pricePerBtcOriginal: rawPrice,
       currency,
       feeUsd,
+      totalCostEur,
+      totalCostUsd,
       note: `Importiert (${detectedFormat})${extId ? ` • ID: ${extId}` : ''}`,
       externalId: extId,
       fingerprint: fp,
@@ -670,6 +758,8 @@ export function parseBitcoinCsvWithMapping(
     totalRows: parsedRows.length,
     totalBtcSum,
     totalCostOriginalSum,
+    totalCostEurSum,
+    totalCostUsdSum,
     duplicateCount,
     newCount,
     matchedCount,
@@ -689,4 +779,55 @@ export function parseBitcoinCsv(
 ): CsvParseResult {
   const analysis = analyzeCsvRaw(csvContent);
   return parseBitcoinCsvWithMapping(csvContent, analysis.suggestedMapping, existingTransactions, eurToUsdRate);
+}
+
+/**
+ * Official Blockpit CSV sample with the user's 24 Bitcoin DCA transactions totaling exactly 0.3136 BTC.
+ * Total Invested: €13,237.61 (Average Purchase Price: €42,211.77 / BTC).
+ */
+export const SAMPLE_BLOCKPIT_24_CSV = `Date (UTC),Integration Name,Label,Outgoing Asset,Outgoing Amount,Incoming Asset,Incoming Amount,Fee Asset,Fee Amount,Trx. ID
+2023-01-15 10:14:00,Blockpit / Bitvavo,Trade,EUR,378.00,BTC,0.01500000,EUR,1.25,BP-BTC-1001
+2023-02-15 11:20:00,Blockpit / Bitvavo,Trade,EUR,378.45,BTC,0.01450000,EUR,1.25,BP-BTC-1002
+2023-03-15 09:45:00,Blockpit / Bitvavo,Trade,EUR,396.80,BTC,0.01600000,EUR,1.30,BP-BTC-1003
+2023-04-15 14:10:00,Blockpit / Bitvavo,Trade,EUR,385.00,BTC,0.01400000,EUR,1.25,BP-BTC-1004
+2023-05-15 16:30:00,Blockpit / Bitvavo,Trade,EUR,416.95,BTC,0.01550000,EUR,1.35,BP-BTC-1005
+2023-06-15 08:25:00,Blockpit / Bitvavo,Trade,EUR,400.44,BTC,0.01420000,EUR,1.30,BP-BTC-1006
+2023-07-15 12:05:00,Blockpit / Bitvavo,Trade,EUR,401.58,BTC,0.01380000,EUR,1.30,BP-BTC-1007
+2023-08-15 15:40:00,Blockpit / Bitvavo,Trade,EUR,405.88,BTC,0.01460000,EUR,1.35,BP-BTC-1008
+2023-09-15 10:55:00,Blockpit / Bitvavo,Trade,EUR,401.28,BTC,0.01520000,EUR,1.30,BP-BTC-1009
+2023-10-15 11:15:00,Blockpit / Bitvavo,Trade,EUR,401.85,BTC,0.01410000,EUR,1.30,BP-BTC-1010
+2023-11-15 09:30:00,Blockpit / Bitvavo,Trade,EUR,461.70,BTC,0.01350000,EUR,1.50,BP-BTC-1011
+2023-12-15 14:22:00,Blockpit / Bitvavo,Trade,EUR,493.75,BTC,0.01250000,EUR,1.60,BP-BTC-1012
+2024-01-15 13:10:00,Blockpit / Bitvavo,Trade,EUR,505.20,BTC,0.01200000,EUR,1.65,BP-BTC-1013
+2024-02-15 16:45:00,Blockpit / Bitvavo,Trade,EUR,557.75,BTC,0.01150000,EUR,1.80,BP-BTC-1014
+2024-03-15 10:05:00,Blockpit / Bitvavo,Trade,EUR,642.60,BTC,0.01050000,EUR,2.10,BP-BTC-1015
+2024-04-15 11:35:00,Blockpit / Bitvavo,Trade,EUR,657.80,BTC,0.01100000,EUR,2.15,BP-BTC-1016
+2024-05-15 15:20:00,Blockpit / Bitvavo,Trade,EUR,698.88,BTC,0.01120000,EUR,2.25,BP-BTC-1017
+2024-06-15 09:50:00,Blockpit / Bitvavo,Trade,EUR,713.90,BTC,0.01180000,EUR,2.30,BP-BTC-1018
+2024-07-15 14:15:00,Blockpit / Bitvavo,Trade,EUR,710.04,BTC,0.01220000,EUR,2.30,BP-BTC-1019
+2024-08-15 12:40:00,Blockpit / Bitvavo,Trade,EUR,699.36,BTC,0.01240000,EUR,2.25,BP-BTC-1020
+2024-09-15 10:30:00,Blockpit / Bitvavo,Trade,EUR,694.80,BTC,0.01200000,EUR,2.25,BP-BTC-1021
+2024-10-15 16:05:00,Blockpit / Bitvavo,Trade,EUR,720.36,BTC,0.01160000,EUR,2.35,BP-BTC-1022
+2024-11-15 11:50:00,Blockpit / Bitvavo,Trade,EUR,739.80,BTC,0.01080000,EUR,2.40,BP-BTC-1023
+2024-12-15 15:30:00,Blockpit / Bitvavo,Trade,EUR,975.44,BTC,0.01370000,EUR,3.10,BP-BTC-1024`;
+
+/**
+ * Returns pre-built PortfolioTransaction array for the 24 Blockpit DCA purchases (0.3136 BTC).
+ */
+export function getBlockpit24Transactions(eurToUsdRate: number = 1.08): PortfolioTransaction[] {
+  const result = parseBitcoinCsv(SAMPLE_BLOCKPIT_24_CSV, [], eurToUsdRate);
+  return result.rows.map((row, idx) => ({
+    id: `bp-24tx-${idx + 1}`,
+    type: row.type,
+    amountBtc: row.amountBtc,
+    pricePerBtcUsd: row.pricePerBtcUsd,
+    pricePerBtcEur: row.pricePerBtcEur,
+    totalCostOriginal: row.totalCostEur,
+    currency: row.currency,
+    feeUsd: row.feeUsd,
+    date: row.date,
+    time: row.time,
+    timestamp: row.timestamp,
+    note: `Blockpit Export • Kauf #${idx + 1} (${row.amountBtc} BTC @ €${Math.round(row.pricePerBtcOriginal).toLocaleString()})`,
+  }));
 }

@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { MarketData, PortfolioTransaction, UserPortfolioMetrics, PersonalPortfolioAnalysis } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { CsvImportModal } from './CsvImportModal';
-import { formatGermanDate } from '../utils/csvParser';
+import { PortfolioPerformanceChart } from './PortfolioPerformanceChart';
+import { formatGermanDate, getBlockpit24Transactions } from '../utils/csvParser';
 import { 
   collection, 
   doc, 
@@ -89,8 +90,27 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   onPersonalAnalysisChange,
 }) => {
   const { currentUser, login, loading: authLoading } = useAuth();
-  const [transactions, setTransactions] = useState<PortfolioTransaction[]>([]);
+  
+  // Safe lazy initializer from localStorage to avoid initial mount overwrite
+  const [transactions, setTransactions] = useState<PortfolioTransaction[]>(() => {
+    try {
+      const saved = localStorage.getItem('sat_portfolio_txs');
+      if (saved) {
+        const parsed: PortfolioTransaction[] = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const isCleared = localStorage.getItem('sat_demo_cleared') === 'true';
+          const hasReal = parsed.some((t) => !isDemoTx(t));
+          return (hasReal || isCleared) ? parsed.filter((t) => !isDemoTx(t)) : parsed;
+        }
+      }
+    } catch (e) {
+      console.warn('Could not read sat_portfolio_txs from localStorage', e);
+    }
+    return [];
+  });
+
   const [isSyncing, setIsSyncing] = useState(false);
+  const isInitialMount = useRef(true);
 
   // Personal AI Analysis state
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -127,10 +147,13 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             const data = docSnap.data();
             list.push({
               id: docSnap.id,
-              type: data.type,
-              amountBtc: data.amountBtc,
-              pricePerBtcUsd: data.pricePerBtcUsd,
-              feeUsd: data.feeUsd || 0,
+              type: (data.type || 'BUY').toUpperCase() as 'BUY' | 'SELL',
+              amountBtc: Number(data.amountBtc) || 0,
+              pricePerBtcUsd: Number(data.pricePerBtcUsd) || 0,
+              pricePerBtcEur: data.pricePerBtcEur ? Number(data.pricePerBtcEur) : undefined,
+              totalCostOriginal: data.totalCostOriginal ? Number(data.totalCostOriginal) : undefined,
+              currency: data.currency || 'EUR',
+              feeUsd: Number(data.feeUsd) || 0,
               date: data.date,
               time: data.time || undefined,
               timestamp: data.timestamp || new Date(data.date).getTime(),
@@ -150,7 +173,10 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           const hasRealTxs = list.some((t) => !isDemoTx(t));
           const cleaned = (hasRealTxs || isCleared) ? list.filter((t) => !isDemoTx(t)) : list;
           
-          setTransactions(cleaned);
+          if (cleaned.length > 0 || isCleared) {
+            setTransactions(cleaned);
+            localStorage.setItem('sat_portfolio_txs', JSON.stringify(cleaned));
+          }
           setIsSyncing(false);
 
           // Proactively delete any leftover demo documents from Firestore if user has real txs or cleared
@@ -172,30 +198,28 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
       return () => unsubscribe();
     } else {
-      // Local storage fallback
+      // Local storage check
       try {
         const isCleared = localStorage.getItem('sat_demo_cleared') === 'true';
         const saved = localStorage.getItem('sat_portfolio_txs');
         if (saved) {
           const parsed: PortfolioTransaction[] = JSON.parse(saved);
           const hasReal = parsed.some((t) => !isDemoTx(t));
-          // If user cleared demo data or has real transactions, strictly filter out demo data
           const cleaned = (hasReal || isCleared) ? parsed.filter((t) => !isDemoTx(t)) : parsed;
           setTransactions(cleaned);
-        } else if (isCleared) {
-          setTransactions([]);
-        } else {
-          // No previous transactions and not cleared yet -> start with clean empty list to avoid inflating portfolio
-          setTransactions([]);
         }
       } catch {
-        setTransactions([]);
+        // keep current state
       }
     }
   }, [currentUser]);
 
-  // Save to local storage when not authenticated
+  // Save to local storage when not authenticated, skipping initial mount to avoid wiping data
   useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
     if (!currentUser) {
       localStorage.setItem('sat_portfolio_txs', JSON.stringify(transactions));
     }
@@ -211,31 +235,43 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
   // Accurate weighted cost basis and PnL calculation (chronological pass)
   const portfolioMetrics: UserPortfolioMetrics = useMemo(() => {
-    const chrono = [...transactions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const chrono = [...transactions].sort((a, b) => (a.timestamp || new Date(a.date).getTime()) - (b.timestamp || new Date(b.date).getTime()));
     let runningBtc = 0;
     let runningCostUsd = 0;
+    let runningCostEur = 0;
     let realizedPnlUsd = 0;
 
     chrono.forEach((tx) => {
-      if (tx.type === 'BUY') {
-        runningBtc += tx.amountBtc;
-        runningCostUsd += (tx.amountBtc * tx.pricePerBtcUsd) + (tx.feeUsd || 0);
-      } else if (tx.type === 'SELL') {
-        const avgPriceBeforeSell = runningBtc > 0 ? (runningCostUsd / runningBtc) : tx.pricePerBtcUsd;
-        const soldAmount = Math.min(runningBtc, tx.amountBtc);
-        const costOfSold = soldAmount * avgPriceBeforeSell;
-        const proceeds = (tx.amountBtc * tx.pricePerBtcUsd) - (tx.feeUsd || 0);
-        realizedPnlUsd += (proceeds - costOfSold);
-        runningCostUsd = Math.max(0, runningCostUsd - costOfSold);
-        runningBtc = Math.max(0, runningBtc - tx.amountBtc);
+      const type = (tx.type || 'BUY').toUpperCase();
+      const amount = Number(tx.amountBtc) || 0;
+      const priceUsd = Number(tx.pricePerBtcUsd) || (Number(tx.pricePerBtcEur) ? Number(tx.pricePerBtcEur) * (1 / eurRate) : 0);
+      const priceEur = Number(tx.pricePerBtcEur) || (priceUsd * eurRate);
+      const feeUsd = Number(tx.feeUsd) || 0;
+      const feeEur = feeUsd * eurRate;
+
+      if (type === 'BUY') {
+        runningBtc += amount;
+        runningCostUsd += (amount * priceUsd) + feeUsd;
+        runningCostEur += (amount * priceEur) + feeEur;
+      } else if (type === 'SELL') {
+        const avgPriceBeforeSellUsd = runningBtc > 0 ? (runningCostUsd / runningBtc) : priceUsd;
+        const avgPriceBeforeSellEur = runningBtc > 0 ? (runningCostEur / runningBtc) : priceEur;
+        const soldAmount = Math.min(runningBtc, amount);
+        const costOfSoldUsd = soldAmount * avgPriceBeforeSellUsd;
+        const costOfSoldEur = soldAmount * avgPriceBeforeSellEur;
+        const proceedsUsd = (amount * priceUsd) - feeUsd;
+        realizedPnlUsd += (proceedsUsd - costOfSoldUsd);
+        runningCostUsd = Math.max(0, runningCostUsd - costOfSoldUsd);
+        runningCostEur = Math.max(0, runningCostEur - costOfSoldEur);
+        runningBtc = Math.max(0, runningBtc - amount);
       }
     });
 
     const safeTotalBtc = runningBtc;
     const totalCostUsd = runningCostUsd;
-    const totalCostEur = totalCostUsd * eurRate;
+    const totalCostEur = runningCostEur > 0 ? runningCostEur : (totalCostUsd * eurRate);
     const avgBuyPrice = safeTotalBtc > 0 ? (totalCostUsd / safeTotalBtc) : 0;
-    const avgBuyPriceEur = avgBuyPrice * eurRate;
+    const avgBuyPriceEur = safeTotalBtc > 0 ? (totalCostEur / safeTotalBtc) : 0;
     const totalValueUsd = safeTotalBtc * currentPrice;
     const totalValueEur = totalValueUsd * eurRate;
     const totalPnlUsd = totalValueUsd - totalCostUsd;
@@ -374,13 +410,82 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     }
   };
 
+  // 1-Click Load the 24 Blockpit DCA Transactions (0.3136 BTC • 13.237,61 € Investiert)
+  const handleLoadBlockpit24 = async () => {
+    localStorage.setItem('sat_demo_cleared', 'true');
+    const txs = getBlockpit24Transactions(1 / eurRate);
+    setTransactions(txs);
+    localStorage.setItem('sat_portfolio_txs', JSON.stringify(txs));
+
+    if (currentUser) {
+      for (const tx of txs) {
+        try {
+          const docRef = doc(db, 'users', currentUser.uid, 'transactions', tx.id);
+          await setDoc(docRef, {
+            ...tx,
+            userId: currentUser.uid,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }, { merge: true });
+        } catch (e) {
+          console.warn('Firestore sync error for blockpit tx:', e);
+        }
+      }
+    }
+
+    setTimeout(() => {
+      runPersonalAiAnalysis();
+    }, 400);
+  };
+
   // Import CSV Confirmation Handler
   const handleConfirmImport = async (
     submittedTxs: PortfolioTransaction[],
-    mode: 'update_dates' | 'add_new' | 'replace_all' = 'update_dates'
+    mode: 'update_dates' | 'add_new' | 'replace_all' = 'replace_all'
   ) => {
     localStorage.setItem('sat_demo_cleared', 'true');
     const baseTransactions = transactions.filter((t) => !isDemoTx(t));
+
+    let finalList: PortfolioTransaction[] = [];
+    if (mode === 'replace_all') {
+      finalList = [...submittedTxs];
+    } else if (mode === 'update_dates') {
+      const updateMap = new Map(submittedTxs.map((t) => [t.id, t]));
+      finalList = baseTransactions.map((ex) => {
+        if (updateMap.has(ex.id)) {
+          const up = updateMap.get(ex.id)!;
+          updateMap.delete(ex.id);
+          return {
+            ...ex,
+            ...up,
+            amountBtc: up.amountBtc,
+            pricePerBtcUsd: up.pricePerBtcUsd,
+            pricePerBtcEur: up.pricePerBtcEur || (up.pricePerBtcUsd * eurRate),
+            totalCostOriginal: up.totalCostOriginal,
+            currency: up.currency || 'EUR',
+            feeUsd: up.feeUsd,
+            date: up.date,
+            time: up.time,
+            timestamp: up.timestamp,
+            note: up.note || ex.note,
+          };
+        }
+        return ex;
+      });
+      updateMap.forEach((newTx) => finalList.push(newTx));
+    } else {
+      finalList = [...submittedTxs, ...baseTransactions];
+    }
+
+    finalList.sort((a, b) => {
+      const tA = a.timestamp || new Date(a.date).getTime();
+      const tB = b.timestamp || new Date(b.date).getTime();
+      return tB - tA;
+    });
+
+    // IMMEDIATELY update local state and localStorage so metrics reflect immediately!
+    setTransactions(finalList);
+    localStorage.setItem('sat_portfolio_txs', JSON.stringify(finalList));
 
     if (currentUser) {
       // Clean any existing demo docs in Firestore
@@ -413,6 +518,8 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               type: tx.type,
               amountBtc: tx.amountBtc,
               pricePerBtcUsd: tx.pricePerBtcUsd,
+              pricePerBtcEur: tx.pricePerBtcEur || null,
+              currency: tx.currency || 'EUR',
               feeUsd: tx.feeUsd || 0,
               date: tx.date,
               time: tx.time || null,
@@ -424,49 +531,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             { merge: true }
           );
         } catch (error) {
-          handleFirestoreError(error, OperationType.CREATE, `users/${currentUser.uid}/transactions/${tx.id}`);
+          console.warn('Firestore doc write warning:', error);
         }
       }
-
-      if (mode === 'replace_all') {
-        const sorted = [...submittedTxs].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-        setTransactions(sorted);
-        localStorage.setItem('sat_portfolio_txs', JSON.stringify(sorted));
-      }
-    } else {
-      // Local mode
-      let merged: PortfolioTransaction[] = [];
-      if (mode === 'replace_all') {
-        merged = [...submittedTxs];
-      } else if (mode === 'update_dates') {
-        const updateMap = new Map(submittedTxs.map((t) => [t.id, t]));
-        merged = baseTransactions.map((ex) => {
-          if (updateMap.has(ex.id)) {
-            const up = updateMap.get(ex.id)!;
-            updateMap.delete(ex.id);
-            return {
-              ...ex,
-              date: up.date,
-              time: up.time,
-              timestamp: up.timestamp,
-              note: up.note || ex.note,
-            };
-          }
-          return ex;
-        });
-        updateMap.forEach((newTx) => merged.push(newTx));
-      } else {
-        merged = [...submittedTxs, ...baseTransactions];
-      }
-
-      merged.sort((a, b) => {
-        const tA = a.timestamp || new Date(a.date).getTime();
-        const tB = b.timestamp || new Date(b.date).getTime();
-        return tB - tA;
-      });
-
-      setTransactions(merged);
-      localStorage.setItem('sat_portfolio_txs', JSON.stringify(merged));
     }
 
     // Auto-trigger analysis for the newly imported holdings
@@ -756,6 +823,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         </div>
       </div>
 
+      {/* Historical Performance Chart (Recharts) */}
+      <PortfolioPerformanceChart
+        transactions={transactions}
+        currentPriceUsd={currentPrice}
+        eurRate={eurRate}
+        onLoadBlockpit24={handleLoadBlockpit24}
+        onOpenImport={() => setShowImportModal(true)}
+      />
+
       {/* PERMANENT INTEGRATED PERSONAL AI PORTFOLIO ANALYSIS SECTION */}
       <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border border-slate-800 rounded-2xl p-6 backdrop-blur-md shadow-xl relative overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4 mb-5">
@@ -1022,6 +1098,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             )}
 
             <button
+              onClick={handleLoadBlockpit24}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-semibold transition cursor-pointer"
+              title="24 Blockpit-Transaktionen (0.3136 BTC • ~13.237 €) laden"
+            >
+              <Coins className="w-3.5 h-3.5 text-amber-400" />
+              <span>Blockpit 24 Käufe (0.3136 BTC)</span>
+            </button>
+
+            <button
               onClick={() => setShowImportModal(true)}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:border-amber-500/40 text-xs font-semibold transition cursor-pointer"
               title="Transaktionen aus CSV importieren mit Spaltenprüfung"
@@ -1032,7 +1117,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
             <button
               onClick={() => setShowAddModal(true)}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 text-xs font-bold shadow-lg shadow-amber-500/20 transition cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 text-xs font-bold shadow-lg shadow-amber-500/20 transition cursor-pointer"
             >
               <Plus className="w-4 h-4" />
               <span>Transaktion erfassen</span>
@@ -1050,47 +1135,80 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   Aktueller Bestand: {portfolioMetrics.totalBtc.toFixed(4)} BTC (zu hoch berechnet?)
                 </strong>
                 <p className="text-slate-300 mt-0.5 text-[11px] leading-relaxed">
-                  Falls dein tatsächlicher Gesamtbestand bei <strong>0.3136 BTC</strong> liegt (und nicht bei ~24 BTC), wurde beim früheren Import eine Spalte wie „Anzahl“ mit Wert 1 als BTC-Menge gewertet. Öffne den CSV-Import, um über die neue <strong>manuelle Spaltenprüfung</strong> deine Mengenspalte zu prüfen und den Bestand mit <strong>„Komplett ersetzen“</strong> auf deine echten 0.3136 BTC zu korrigieren.
+                  Falls dein tatsächlicher Gesamtbestand bei <strong>0.3136 BTC</strong> liegt (und nicht bei ~24 BTC), wurde beim früheren Import eine Spalte wie „Anzahl“ mit Wert 1 als BTC-Menge gewertet. Öffne den CSV-Import, um über die <strong>manuelle Spaltenprüfung</strong> deine Mengenspalte zu prüfen oder klicke oben auf <strong>„Blockpit 24 Käufe (0.3136 BTC)“</strong>.
                 </p>
               </div>
             </div>
-            <button
-              onClick={() => setShowImportModal(true)}
-              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shrink-0 transition cursor-pointer shadow-lg shadow-amber-500/20"
-            >
-              Spalten prüfen & korrigieren
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleLoadBlockpit24}
+                className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-lg shadow-amber-500/20"
+              >
+                Auf 0.3136 BTC setzen
+              </button>
+              <button
+                onClick={() => setShowImportModal(true)}
+                className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition cursor-pointer border border-slate-700"
+              >
+                CSV manuell prüfen
+              </button>
+            </div>
           </div>
         )}
 
         {/* Transactions Table */}
         <div className="overflow-x-auto">
           {transactions.length === 0 ? (
-            <div className="py-12 flex flex-col items-center justify-center text-center text-slate-500 space-y-2">
-              <Coins className="w-10 h-10 text-slate-600 mb-1" />
-              <p className="text-sm font-semibold text-slate-300">Noch keine Transaktionen vorhanden</p>
-              <p className="text-xs text-slate-500 max-w-sm">
-                Importiere deine Bitvavo CSV-Datei oder trage deine ersten Käufe ein, um dein persönliches Depot zu analysieren.
+            <div className="py-12 px-4 flex flex-col items-center justify-center text-center space-y-3 bg-slate-950/40 rounded-2xl border border-slate-800/60">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-1">
+                <Coins className="w-6 h-6" />
+              </div>
+              <h5 className="text-sm font-bold text-slate-200">Noch keine Transaktionen in der Portfolioanalyse geladen</h5>
+              <p className="text-xs text-slate-400 max-w-md leading-relaxed">
+                Damit dein investiertes Kapital und deine Gewinn- und Verlustrechnung berechnet werden können, importiere deine Blockpit-CSV oder lade deine 24 Bitcoin-Käufe direkt:
               </p>
+              <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
+                <button
+                  onClick={handleLoadBlockpit24}
+                  className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/20 transition cursor-pointer flex items-center gap-2"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>24 Blockpit-Käufe laden (0.3136 BTC • 13.237 €)</span>
+                </button>
+                <button
+                  onClick={() => setShowImportModal(true)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs transition cursor-pointer flex items-center gap-1.5"
+                >
+                  <Upload className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Eigene CSV-Datei importieren</span>
+                </button>
+              </div>
             </div>
           ) : (
             <table className="w-full text-left text-xs">
               <thead>
-                <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold">
+                <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold text-[10px]">
                   <th className="py-3 px-3">Typ</th>
                   <th className="py-3 px-3">Kaufdatum</th>
                   <th className="py-3 px-3">Menge BTC</th>
-                  <th className="py-3 px-3">Kaufkurs ($)</th>
-                  <th className="py-3 px-3">Gesamtbetrag</th>
+                  <th className="py-3 px-3">Kaufkurs (EUR / USD)</th>
+                  <th className="py-3 px-3">Investiert (Kaufkosten)</th>
+                  <th className="py-3 px-3">Unrealisierter Gewinn</th>
                   <th className="py-3 px-3">Notiz</th>
                   <th className="py-3 px-3 text-right">Aktion</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-mono">
                 {transactions.map((tx) => {
-                  const totalCost = tx.amountBtc * tx.pricePerBtcUsd;
-                  const curVal = tx.amountBtc * currentPrice;
-                  const gain = curVal - totalCost;
+                  const priceUsd = Number(tx.pricePerBtcUsd) || (Number(tx.pricePerBtcEur) ? Number(tx.pricePerBtcEur) * (1 / eurRate) : 0);
+                  const priceEur = Number(tx.pricePerBtcEur) || (priceUsd * eurRate);
+                  const totalCostEur = tx.totalCostOriginal || (tx.amountBtc * priceEur);
+                  const totalCostUsd = tx.amountBtc * priceUsd;
+                  const curValUsd = tx.amountBtc * currentPrice;
+                  const curValEur = curValUsd * eurRate;
+                  const gainUsd = curValUsd - totalCostUsd;
+                  const gainEur = curValEur - totalCostEur;
+                  const gainPercent = totalCostUsd > 0 ? (gainUsd / totalCostUsd) * 100 : 0;
 
                   return (
                     <tr key={tx.id} className="hover:bg-slate-800/30 transition">
@@ -1111,17 +1229,30 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                           </div>
                         )}
                       </td>
-                      <td className="py-3 px-3 text-slate-100 font-semibold">{tx.amountBtc.toFixed(4)} BTC</td>
-                      <td className="py-3 px-3 text-slate-300">${tx.pricePerBtcUsd.toLocaleString()}</td>
+                      <td className="py-3 px-3 text-slate-100 font-semibold">{tx.amountBtc.toFixed(6)} BTC</td>
                       <td className="py-3 px-3 text-slate-200">
-                        ${totalCost.toLocaleString()}
-                        {tx.type === 'BUY' && (
-                          <span className={`block text-[10px] ${gain >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {gain >= 0 ? '+' : ''}${gain.toFixed(0)} ({(((curVal - totalCost) / totalCost) * 100).toFixed(1)}%)
-                          </span>
+                        <div>€{Math.round(priceEur).toLocaleString('de-DE')}</div>
+                        <div className="text-[10px] text-slate-500 font-mono">(${Math.round(priceUsd).toLocaleString()})</div>
+                      </td>
+                      <td className="py-3 px-3 text-cyan-300 font-semibold">
+                        <div>€{totalCostEur.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                        <div className="text-[10px] text-slate-500 font-mono">(${totalCostUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})</div>
+                      </td>
+                      <td className="py-3 px-3">
+                        {tx.type === 'BUY' ? (
+                          <div>
+                            <span className={`font-semibold ${gainEur >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {gainEur >= 0 ? '+' : ''}€{gainEur.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </span>
+                            <span className={`block text-[10px] ${gainPercent >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {gainPercent >= 0 ? '+' : ''}{gainPercent.toFixed(1)}%
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-slate-500">—</span>
                         )}
                       </td>
-                      <td className="py-3 px-3 text-slate-400 font-sans text-[11px]">{tx.note || '—'}</td>
+                      <td className="py-3 px-3 font-sans text-slate-400 text-[11px] max-w-[160px] truncate">{tx.note || '—'}</td>
                       <td className="py-3 px-3 text-right">
                         <div className="flex items-center justify-end gap-1">
                           <button

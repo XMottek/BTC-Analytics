@@ -1,3 +1,19 @@
+export interface FearAndGreedTrendPoint {
+  date: string;
+  value: number;
+  classification: string;
+}
+
+export interface FearAndGreedData {
+  value: number;
+  classification: string;
+  yesterdayValue?: number;
+  lastWeekValue?: number;
+  historicalTrend?: FearAndGreedTrendPoint[];
+  sentimentContext?: string;
+  timeUntilUpdate?: string;
+}
+
 export interface MarketData {
   priceUsd: number;
   priceEur: number;
@@ -7,10 +23,7 @@ export interface MarketData {
   volumeBtc24h: number;
   volumeUsd24h: number;
   marketCapUsd: number;
-  fearAndGreedIndex: {
-    value: number;
-    classification: string;
-  };
+  fearAndGreedIndex: FearAndGreedData;
   rsi14: number;
   halvingCycle: {
     daysSinceHalving: number;
@@ -81,6 +94,9 @@ export interface PortfolioTransaction {
   type: 'BUY' | 'SELL';
   amountBtc: number;
   pricePerBtcUsd: number;
+  pricePerBtcEur?: number;
+  totalCostOriginal?: number;
+  currency?: 'EUR' | 'USD';
   feeUsd: number;
   date: string;
   time?: string;

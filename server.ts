@@ -29,12 +29,112 @@ async function startServer() {
   let lastFetchTime = 0;
   const CACHE_TTL_MS = 15000; // 15 seconds
 
+  // In-memory cache for live Fear & Greed data (updated once or twice a day by Alternative.me)
+  let cachedFngData: any = null;
+  let lastFngFetchTime = 0;
+  const FNG_CACHE_TTL_MS = 60 * 1000 * 5; // 5 minutes cache
+
+  async function getLiveFearAndGreed() {
+    const now = Date.now();
+    if (cachedFngData && now - lastFngFetchTime < FNG_CACHE_TTL_MS) {
+      return cachedFngData;
+    }
+
+    try {
+      const fngRes = await fetch('https://api.alternative.me/fng/?limit=7');
+      if (fngRes.ok) {
+        const json = await fngRes.json();
+        if (json && json.data && json.data.length > 0) {
+          const current = json.data[0];
+          const val = parseInt(current.value, 10);
+          const yesterday = json.data[1] ? parseInt(json.data[1].value, 10) : undefined;
+          const lastWeek = json.data[6] ? parseInt(json.data[6].value, 10) : undefined;
+
+          const mapGermanClass = (score: number) => {
+            if (score <= 24) return 'Extreme Fear (Extreme Angst)';
+            if (score <= 46) return 'Fear (Angst)';
+            if (score <= 54) return 'Neutral (Ausgeglichen)';
+            if (score <= 75) return 'Greed (Gier)';
+            return 'Extreme Greed (Extreme Gier)';
+          };
+
+          const historicalTrend = json.data.map((item: any) => {
+            const d = new Date(parseInt(item.timestamp, 10) * 1000);
+            const dateStr = d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+            return {
+              date: dateStr,
+              value: parseInt(item.value, 10),
+              classification: item.value_classification,
+            };
+          }).reverse();
+
+          let timeUntilUpdate = undefined;
+          if (current.time_until_update) {
+            const secs = parseInt(current.time_until_update, 10);
+            const hrs = Math.floor(secs / 3600);
+            const mins = Math.floor((secs % 3600) / 60);
+            timeUntilUpdate = `${hrs}h ${mins}m`;
+          }
+
+          let sentimentContext = 'Überwiegend optimistische Marktstimmung mit aktiver Nachfrage.';
+          if (val <= 24) {
+            sentimentContext = 'Kapitulation & Panikverkäufe: Historisch optimales Zeitfenster für antizyklische DCA-Akkumulation.';
+          } else if (val <= 46) {
+            sentimentContext = 'Risikoaversion & Skepsis dominieren: Attraktives Chance-Risiko-Verhältnis für stufenweise Zukäufe an Supports.';
+          } else if (val <= 54) {
+            sentimentContext = 'Gleichgewicht zwischen Bullen & Bären: Markt wartet auf makroökonomische Impulse (Fed, Zinsen).';
+          } else if (val <= 75) {
+            sentimentContext = 'Gesunde Aufwärtsdynamik & Optimismus: Disziplinierte DCA-Ausführung ohne unüberlegte FOMO-Einstiege.';
+          } else {
+            sentimentContext = 'Überhitzte Euphorie: Vorsicht vor Hebel-Bereinigungen & Volatilitätsspitzen; Zeit für planmäßige Gewinnmitnahmen.';
+          }
+
+          cachedFngData = {
+            value: val,
+            classification: mapGermanClass(val),
+            yesterdayValue: yesterday,
+            lastWeekValue: lastWeek,
+            historicalTrend,
+            timeUntilUpdate,
+            sentimentContext,
+          };
+          lastFngFetchTime = now;
+          return cachedFngData;
+        }
+      }
+    } catch (err) {
+      console.warn('Alternative.me API fetch failed, fallback to simulated index:', err);
+    }
+
+    // High fidelity fallback
+    const fallbackVal = 61;
+    return {
+      value: fallbackVal,
+      classification: 'Greed (Gier)',
+      yesterdayValue: 64,
+      lastWeekValue: 70,
+      historicalTrend: [
+        { date: '05.10', value: 70, classification: 'Greed' },
+        { date: '06.10', value: 73, classification: 'Greed' },
+        { date: '07.10', value: 71, classification: 'Greed' },
+        { date: '08.10', value: 64, classification: 'Greed' },
+        { date: '09.10', value: 59, classification: 'Greed' },
+        { date: '10.10', value: 64, classification: 'Greed' },
+        { date: '11.10', value: 61, classification: 'Greed' },
+      ],
+      timeUntilUpdate: '15h 20m',
+      sentimentContext: 'Gesunde Aufwärtsdynamik & Optimismus: Disziplinierte DCA-Ausführung ohne unüberlegte FOMO-Einstiege.',
+    };
+  }
+
   // Endpoint: Get Live Bitcoin Market Data
   app.get('/api/market/bitcoin', async (req, res) => {
     const now = Date.now();
     if (cachedMarketData && now - lastFetchTime < CACHE_TTL_MS) {
       return res.json(cachedMarketData);
     }
+
+    const fngData = await getLiveFearAndGreed();
 
     try {
       // Fetch from Binance ticker
@@ -48,7 +148,7 @@ async function startServer() {
         const volume24h = parseFloat(data.volume);
         const quoteVolume = parseFloat(data.quoteVolume);
 
-        // Approximate EUR conversion (standard 1 USD ~= 0.92 EUR)
+        // Approximate EUR conversion (standard 1 USD ~= 0.925 EUR)
         const usdToEur = 0.925;
 
         cachedMarketData = {
@@ -60,10 +160,7 @@ async function startServer() {
           volumeBtc24h: volume24h,
           volumeUsd24h: quoteVolume,
           marketCapUsd: price * 19780000, // ~19.78M BTC mined
-          fearAndGreedIndex: {
-            value: change24h > 2 ? 72 : change24h < -2 ? 38 : 58,
-            classification: change24h > 2 ? 'Greed (Gier)' : change24h < -2 ? 'Fear (Angst)' : 'Neutral',
-          },
+          fearAndGreedIndex: fngData,
           rsi14: Math.min(85, Math.max(25, 52 + change24h * 1.8)),
           halvingCycle: {
             daysSinceHalving: 900,
@@ -93,10 +190,7 @@ async function startServer() {
       volumeBtc24h: 28410,
       volumeUsd24h: 2740000000,
       marketCapUsd: priceUsd * 19780000,
-      fearAndGreedIndex: {
-        value: 68,
-        classification: 'Greed (Gier)',
-      },
+      fearAndGreedIndex: fngData,
       rsi14: 61.4,
       halvingCycle: {
         daysSinceHalving: 900,
@@ -210,8 +304,11 @@ Deine Aufgabe ist es, auf Basis der aktuellen Bitcoin-Marktbewegungen, fiskalpol
 Antworte IMMER auf DEUTSCH und gib ausschließlich valides JSON zurück, das dem vorgegebenen Schema entspricht.
 Sei realistisch, analytisch und präzise, nenne konkrete Preisspannen und nachvollziehbare Hebelpunkte.`;
 
-      const prompt = `Analysiere die aktuelle Bitcoin-Lage und die fiskalisch-politischen Rahmenbedingungen:
+      const fngData = await getLiveFearAndGreed();
+
+      const prompt = `Analysiere die aktuelle Bitcoin-Lage und die fiskalisch-politischen Rahmenbedingungen unter Berücksichtigung des aktuellen Markt-Sentiments:
 Aktueller BTC-Kurs: ~$${currentPrice.toLocaleString('en-US')} USD.
+Aktueller Sentiment-Kontext: Fear & Greed Index steht bei ${fngData.value}/100 (${fngData.classification}).
 Fiskalische & Politische Annahmen:
 - Fed & Zentralbankpolitik: ${macroSettings.fedRateCutExpectation}
 - Fiskaldefizite & Staatsschulden: ${macroSettings.usDebtCeilingDeficit}
@@ -225,7 +322,7 @@ Erstelle:
 2. Eine tiefgehende Rationale unterteilt in:
    - Fiskalische Dynamik (M2-Liquidität, Realzinsen, Entwertung von Papierwährungen)
    - Politische & regulatorische Hebel (US-Politik, ETF-Inflows, Reserven)
-   - Technische & zyklische Indikatoren (Halving-Zyklus, MVRV, RSI, Support/Resistenz)
+   - Technische & zyklische Indikatoren (Halving-Zyklus, MVRV, RSI, Support/Resistenz und Abgleich mit dem Fear & Greed Sentiment)
    - On-Chain & Marktstruktur (Langzeit-HODLer, Minerkosten, Liquiditätsbänder)
 3. Drei Szenarien (Bullish, Basis, Bearish) mit Wahrscheinlichkeiten (%) und Zielkursen für 3 Monate, 6 Monate und 12 Monate.
 4. Einen monatlichen Prognosepfad für die nächsten 12 Monate mit Werten (month, basePrice, bullPrice, bearPrice).

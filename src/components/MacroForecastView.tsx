@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { MarketData, MacroSettings, MacroForecastResult, UserPortfolioMetrics, PersonalPortfolioAnalysis } from '../types';
 import { ScenarioChart } from './ScenarioChart';
+import { FearAndGreedWidget } from './FearAndGreedWidget';
 import { 
   Sparkles, 
   RefreshCw, 
@@ -359,9 +360,16 @@ export const MacroForecastView: React.FC<MacroForecastViewProps> = ({
               </div>
 
               <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-4">
-                <div className="flex items-center gap-2 text-xs font-bold text-amber-400 mb-2">
-                  <TrendingUp className="w-4 h-4" />
-                  3. Technische Chartmuster & Halving-Phase
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-amber-400">
+                    <TrendingUp className="w-4 h-4" />
+                    3. Technische Chartmuster & Halving-Phase
+                  </div>
+                  {marketData?.fearAndGreedIndex && (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 font-semibold border border-amber-500/20">
+                      Sentiment: {marketData.fearAndGreedIndex.value}/100
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-slate-300 leading-relaxed">
                   {forecast.rationale.technical}
@@ -386,6 +394,9 @@ export const MacroForecastView: React.FC<MacroForecastViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Fear & Greed Sentiment Context Widget alongside AI Technical Strategy */}
+      <FearAndGreedWidget marketData={marketData} forecast={forecast} />
 
       {/* PERSONAL BITCOIN PORTFOLIO MACRO IMPACT & STRATEGY */}
       {userPortfolioMetrics && userPortfolioMetrics.totalBtc > 0 ? (
